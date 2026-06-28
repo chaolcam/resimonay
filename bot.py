@@ -10,15 +10,15 @@ TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URI = os.environ.get("MONGO_URI") 
 
 ADMIN_GROUP_ID = -1003791676374
-TARGET_GROUP_ID = -1004357691251
-TARGET_THREAD_ID = 20969
+TARGET_CHANNEL_ID = -1003977263609 
+CHANNEL_USERNAME = "yorumlapuanla" 
 
 bot = telebot.TeleBot(TOKEN)
 
 # --- MONGODB BAĞLANTISI ---
 db_client = pymongo.MongoClient(MONGO_URI)
 db = db_client["oylama_botu_veritabani"]
-votes_col = db["oylar"] 
+votes_col = db["oylar_kanal"] 
 
 processed_albums = set()
 
@@ -43,18 +43,68 @@ def generate_rating_keyboard(message_id):
     markup.add(*row_buttons)
     return markup
 
-# 1. /start Komutu
+# 1. /start Komutu (Sorumluluk Reddi Eklenmiş Hali)
 @bot.message_handler(commands=['start'], chat_types=['private'])
 def send_welcome(message):
     welcome_text = (
         "Hoş geldiniz! Bu bot sayesinde gönderdiğiniz resimleri/videoları oylatabilirsiniz. "
         "Lütfen sadece tek bir resim veya video gönderiniz. "
-        "Gönderiniz admin onayından geçince ilgili konuda paylaşılacaktır."
+        "Gönderiniz admin onayından geçince kanalımızda paylaşılacaktır.\n\n"
+        "⚠️ <b>Yasal Uyarı:</b> Burada paylaşılan medyalardaki kişilerin rızası ile atıldığı kabul edilir. "
+        "Doğabilecek olası yasal sorunlardan veya sorumluluklardan bot yönetimi sorumlu değildir.\n\n"
+        "🏆 Kanalın en iyilerini görmek için /siralama yazabilirsiniz!"
     )
     try:
-        bot.reply_to(message, welcome_text)
+        bot.reply_to(message, welcome_text, parse_mode="HTML")
     except Exception as e:
         pass
+
+# --- /siralama KOMUTU ---
+@bot.message_handler(commands=['siralama'])
+def send_ranking(message):
+    try:
+        all_votes = votes_col.find({})
+        ranking_data = []
+
+        for doc in all_votes:
+            msg_id = doc.get("msg_id")
+            voters = doc.get("voters", {})
+            
+            if not voters:
+                continue
+            
+            total_votes = len(voters)
+            avg_score = sum(voters.values()) / total_votes
+            
+            ranking_data.append({
+                "msg_id": msg_id,
+                "avg_score": avg_score,
+                "total_votes": total_votes
+            })
+        
+        if not ranking_data:
+            bot.reply_to(message, "Henüz hiç oy alan gönderi bulunmuyor.")
+            return
+
+        ranking_data.sort(key=lambda x: (x["avg_score"], x["total_votes"]), reverse=True)
+        
+        top_10 = ranking_data[:10]
+        
+        text = "🏆 <b>En Yüksek Puanlı Gönderiler (Top 10)</b> 🏆\n\n"
+        
+        for i, data in enumerate(top_10, 1):
+            msg_id = data["msg_id"]
+            avg = data["avg_score"]
+            votes_count = data["total_votes"]
+            link = f"https://t.me/{CHANNEL_USERNAME}/{msg_id}"
+            
+            text += f"<b>{i}.</b> <a href='{link}'>Gönderiye Git</a> - ⭐ {avg:.2f} <i>({votes_count} oy)</i>\n"
+            
+        bot.reply_to(message, text, parse_mode="HTML", disable_web_page_preview=True)
+        
+    except Exception as e:
+        bot.reply_to(message, "Sıralama oluşturulurken bir hata oluştu.")
+        print(f"Sıralama hatası: {e}")
 
 # 2. Özel mesajdan gelenleri yakala
 @bot.message_handler(content_types=['photo', 'video'], chat_types=['private'])
@@ -62,7 +112,7 @@ def handle_media(message):
     user_id = message.chat.id
     caption = message.caption if message.caption else ""
     user_name = message.from_user.first_name
-    orig_msg_id = message.message_id  # YENİ: Kullanıcının mesajının ID'sini alıyoruz
+    orig_msg_id = message.message_id  
 
     if message.media_group_id:
         if message.media_group_id not in processed_albums:
@@ -79,7 +129,6 @@ def handle_media(message):
         user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
 
     markup = InlineKeyboardMarkup()
-    # YENİ: Callback data içine kullanıcının orijinal mesaj ID'sini de (orig_msg_id) ekledik
     btn_approve = InlineKeyboardButton("Onayla ✅", callback_data=f"approve_{user_id}_{orig_msg_id}")
     btn_reject = InlineKeyboardButton("Reddet ❌", callback_data=f"reject_{user_id}_{orig_msg_id}")
     markup.add(btn_approve, btn_reject)
@@ -144,7 +193,7 @@ def handle_callback(call):
             new_markup = generate_rating_keyboard(msg_id)
             
             bot.edit_message_caption(
-                chat_id=TARGET_GROUP_ID,
+                chat_id=TARGET_CHANNEL_ID,
                 message_id=msg_id,
                 caption=new_caption,
                 reply_markup=new_markup
@@ -161,8 +210,6 @@ def handle_callback(call):
     parts = data.split("_")
     action = parts[0]
     user_id = parts[1]
-    
-    # YENİ: Eğer callback içinde mesaj ID varsa alıyoruz
     orig_msg_id = int(parts[2]) if len(parts) > 2 else None 
     
     plain_caption = admin_msg.caption if admin_msg.caption else ""
@@ -184,17 +231,15 @@ def handle_callback(call):
             
             if admin_msg.content_type == 'photo':
                 sent_msg = bot.send_photo(
-                    TARGET_GROUP_ID, 
+                    TARGET_CHANNEL_ID, 
                     admin_msg.photo[-1].file_id, 
-                    caption=initial_caption, 
-                    message_thread_id=TARGET_THREAD_ID
+                    caption=initial_caption
                 )
             elif admin_msg.content_type == 'video':
                 sent_msg = bot.send_video(
-                    TARGET_GROUP_ID, 
+                    TARGET_CHANNEL_ID, 
                     admin_msg.video.file_id, 
-                    caption=initial_caption, 
-                    message_thread_id=TARGET_THREAD_ID
+                    caption=initial_caption
                 )
             
             post_link = ""
@@ -202,33 +247,30 @@ def handle_callback(call):
                 votes_col.insert_one({"msg_id": sent_msg.message_id, "voters": {}})
                 
                 initial_markup = generate_rating_keyboard(sent_msg.message_id)
-                bot.edit_message_reply_markup(chat_id=TARGET_GROUP_ID, message_id=sent_msg.message_id, reply_markup=initial_markup)
+                bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=sent_msg.message_id, reply_markup=initial_markup)
 
-                clean_chat_id = str(TARGET_GROUP_ID).replace("-100", "")
-                post_link = f"https://t.me/c/{clean_chat_id}/{sent_msg.message_id}"
+                post_link = f"https://t.me/{CHANNEL_USERNAME}/{sent_msg.message_id}"
 
             bot.edit_message_caption(f"✅ ONAYLANDI\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
             
             try: 
-                # YENİ: Kullanıcıya resmini yanıtlayarak onay mesajı ve link atıyoruz
-                bildirim_mesaji = f"🎉 Resminiz onaylandı! Buradaki linkten ulaşabilirsiniz:\n{post_link}"
+                bildirim_mesaji = f"🎉 Resminiz onaylandı ve kanalımızda paylaşıldı!\n\nBuradaki linkten ulaşabilirsiniz:\n{post_link}"
                 if orig_msg_id:
                     bot.send_message(user_id, bildirim_mesaji, reply_to_message_id=orig_msg_id)
                 else:
                     bot.send_message(user_id, bildirim_mesaji)
             except: pass
                 
-            bot.answer_callback_query(call.id, "İçerik paylaşıldı ve kullanıcıya iletildi!")
+            bot.answer_callback_query(call.id, "İçerik kanalda paylaşıldı!")
             
         except Exception as e:
-            bot.answer_callback_query(call.id, "Hata oluştu!")
+            bot.answer_callback_query(call.id, "Hata! Botun kanalda admin olup olmadığını kontrol edin.")
             print(f"Paylaşım Hatası: {e}")
 
     elif action == "reject":
         try:
             bot.edit_message_caption(f"❌ REDDEDİLDİ\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
             try: 
-                # YENİ: Kullanıcıya resmini yanıtlayarak ret mesajı atıyoruz
                 red_mesaji = "❌ Maalesef gönderdiğiniz resim reddedildi."
                 if orig_msg_id:
                     bot.send_message(user_id, red_mesaji, reply_to_message_id=orig_msg_id)
@@ -244,7 +286,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Oylama Botu (Kalıcı Hafızalı ve Yanıtlamalı) Aktif!"
+    return "Oylama Botu (Yasal Uyarılı) Aktif!"
 
 def run():
     port = int(os.environ.get("PORT", 8080))
@@ -256,5 +298,5 @@ def keep_alive():
 
 if __name__ == "__main__":
     keep_alive() 
-    print("Bot kalıcı veritabanı ve gelişmiş yanıt sistemi ile başlatıldı!")
+    print("Bot yasal uyarılı olarak başlatıldı!")
     bot.infinity_polling()
