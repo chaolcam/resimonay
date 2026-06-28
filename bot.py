@@ -3,22 +3,31 @@ import os
 from threading import Thread
 from flask import Flask
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import pymongo # YENİ: MongoDB Kütüphanesi
 
-# --- AYARLAR ---
+# --- AYARLAR VE GİZLİ KEYLER ---
 TOKEN = os.environ.get("BOT_TOKEN") 
+MONGO_URI = os.environ.get("MONGO_URI") # Render'a ekleyeceğiz
+
 ADMIN_GROUP_ID = -1003791676374
 TARGET_GROUP_ID = -1004357691251
 TARGET_THREAD_ID = 20969
 
 bot = telebot.TeleBot(TOKEN)
 
-# Hafıza depoları
-processed_albums = set()
-votes = {}  
+# --- MONGODB BAĞLANTISI ---
+db_client = pymongo.MongoClient(MONGO_URI)
+db = db_client["oylama_botu_veritabani"]
+votes_col = db["oylar"] # Oyların tutulacağı koleksiyon
 
-# 1'den 10'a kadar olan puanlama butonlarını üreten yardımcı fonksiyon
+# Albüm bildirimleri için geçici hafıza (bunun silinmesi sorun yaratmaz)
+processed_albums = set()
+
+# --- YARDIMCI FONKSİYON: Puanlama Butonları ---
 def generate_rating_keyboard(message_id):
-    msg_votes = votes.get(message_id, {})
+    # Oyları geçici hafıza yerine doğrudan veritabanından çekiyoruz
+    doc = votes_col.find_one({"msg_id": message_id})
+    msg_votes = doc.get("voters", {}) if doc else {}
     
     counts = {i: 0 for i in range(1, 11)}
     for v in msg_votes.values():
@@ -47,7 +56,7 @@ def send_welcome(message):
     try:
         bot.reply_to(message, welcome_text)
     except Exception as e:
-        print(f"Kullanıcıya mesaj iletilemedi: {e}")
+        pass
 
 # 2. Özel mesajdan gelenleri yakala
 @bot.message_handler(content_types=['photo', 'video'], chat_types=['private'])
@@ -100,20 +109,27 @@ def handle_callback(call):
             _, msg_id_str, score_str = data.split("_")
             msg_id = int(msg_id_str)
             score = int(score_str)
-            voter_id = call.from_user.id
+            voter_id = str(call.from_user.id) # Veritabanı için string yapıyoruz
             
-            if msg_id not in votes:
-                votes[msg_id] = {}
+            # Veritabanından o anki durumu çek
+            doc = votes_col.find_one({"msg_id": msg_id})
+            if not doc:
+                # Eğer oylama sandığı yoksa oluştur (Eski mesajlara tıklanırsa çökmemesi için)
+                votes_col.insert_one({"msg_id": msg_id, "voters": {}})
+                msg_votes = {}
+            else:
+                msg_votes = doc.get("voters", {})
                 
-            current_vote = votes[msg_id].get(voter_id)
+            current_vote = msg_votes.get(voter_id)
             
             if current_vote == score:
                 bot.answer_callback_query(call.id, f"Zaten bu resme {score} puan vermişsiniz!")
                 return
             
-            votes[msg_id][voter_id] = score
+            # Oyu veritabanına kaydet
+            msg_votes[voter_id] = score
+            votes_col.update_one({"msg_id": msg_id}, {"$set": {"voters": msg_votes}}, upsert=True)
             
-            msg_votes = votes[msg_id]
             total_votes = len(msg_votes)
             avg_score = sum(msg_votes.values()) / total_votes
             
@@ -148,7 +164,6 @@ def handle_callback(call):
     action = data.split("_")[0]
     user_id = data.split("_")[1]
     
-    # 1. Hedef gruba göndermek için HTML'siz, dümdüz metni alıyoruz
     plain_caption = admin_msg.caption if admin_msg.caption else ""
     if "\n\n" in plain_caption:
         original_caption = plain_caption.split("\n\n", 1)[1]
@@ -156,13 +171,11 @@ def handle_callback(call):
         original_caption = ""
     original_caption = original_caption.strip()
 
-    # 2. Admin grubunu düzenlemek için HTML korumalı metni alıyoruz (Linkler bozulmaz)
     html_full_caption = admin_msg.html_caption if admin_msg.html_caption else plain_caption
 
     if action == "approve":
         try:
             sent_msg = None
-            # Hedef gruba gönderilecek temiz metin
             if original_caption:
                 initial_caption = f"{original_caption}\n\n📊 Oylama Sonucu:\n⭐ Henüz oy verilmedi."
             else:
@@ -184,17 +197,16 @@ def handle_callback(call):
                 )
             
             if sent_msg:
-                votes[sent_msg.message_id] = {}
+                # YENİ: Veritabanında bu resim için yeni bir oy sandığı açıyoruz
+                votes_col.insert_one({"msg_id": sent_msg.message_id, "voters": {}})
+                
                 initial_markup = generate_rating_keyboard(sent_msg.message_id)
                 bot.edit_message_reply_markup(chat_id=TARGET_GROUP_ID, message_id=sent_msg.message_id, reply_markup=initial_markup)
 
-            # Admin grubundaki mesajı düzenlerken "html_full_caption" kullanıyoruz
             bot.edit_message_caption(f"✅ ONAYLANDI\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
             
-            try:
-                bot.send_message(user_id, "🎉 Resim onaylandı, ilgili konuda resminizi bulabilirsiniz.")
-            except:
-                pass
+            try: bot.send_message(user_id, "🎉 Resim onaylandı, ilgili konuda resminizi bulabilirsiniz.")
+            except: pass
                 
             bot.answer_callback_query(call.id, "İçerik paylaşıldı!")
             
@@ -204,22 +216,19 @@ def handle_callback(call):
 
     elif action == "reject":
         try:
-            # Ret durumunda da aynı şekilde HTML korumalı metni kullanıyoruz
             bot.edit_message_caption(f"❌ REDDEDİLDİ\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
-            try:
-                bot.send_message(user_id, "Resminiz reddedildi.")
-            except:
-                pass
+            try: bot.send_message(user_id, "Resminiz reddedildi.")
+            except: pass
             bot.answer_callback_query(call.id, "İçerik reddedildi.")
         except Exception as e:
-            print(f"Reddetme hatası: {e}")
+            pass
 
 # --- RENDER & UPTIMEROBOT İÇİN WEB SUNUCUSU ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Telegram Botu Aktif ve Çalışıyor!"
+    return "Oylama Botu (Kalıcı Hafızalı) Aktif!"
 
 def run():
     port = int(os.environ.get("PORT", 8080))
@@ -229,8 +238,7 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- ÇALIŞTIRMA ---
 if __name__ == "__main__":
     keep_alive() 
-    print("Bot tüm düzeltmelerle başlatıldı! Bekleniyor...")
+    print("Bot kalıcı MongoDB veritabanı ile başlatıldı!")
     bot.infinity_polling()
