@@ -3,11 +3,11 @@ import os
 from threading import Thread
 from flask import Flask
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import pymongo # YENİ: MongoDB Kütüphanesi
+import pymongo
 
 # --- AYARLAR VE GİZLİ KEYLER ---
 TOKEN = os.environ.get("BOT_TOKEN") 
-MONGO_URI = os.environ.get("MONGO_URI") # Render'a ekleyeceğiz
+MONGO_URI = os.environ.get("MONGO_URI") 
 
 ADMIN_GROUP_ID = -1003791676374
 TARGET_GROUP_ID = -1004357691251
@@ -18,14 +18,12 @@ bot = telebot.TeleBot(TOKEN)
 # --- MONGODB BAĞLANTISI ---
 db_client = pymongo.MongoClient(MONGO_URI)
 db = db_client["oylama_botu_veritabani"]
-votes_col = db["oylar"] # Oyların tutulacağı koleksiyon
+votes_col = db["oylar"] 
 
-# Albüm bildirimleri için geçici hafıza (bunun silinmesi sorun yaratmaz)
 processed_albums = set()
 
 # --- YARDIMCI FONKSİYON: Puanlama Butonları ---
 def generate_rating_keyboard(message_id):
-    # Oyları geçici hafıza yerine doğrudan veritabanından çekiyoruz
     doc = votes_col.find_one({"msg_id": message_id})
     msg_votes = doc.get("voters", {}) if doc else {}
     
@@ -64,6 +62,7 @@ def handle_media(message):
     user_id = message.chat.id
     caption = message.caption if message.caption else ""
     user_name = message.from_user.first_name
+    orig_msg_id = message.message_id  # YENİ: Kullanıcının mesajının ID'sini alıyoruz
 
     if message.media_group_id:
         if message.media_group_id not in processed_albums:
@@ -80,8 +79,9 @@ def handle_media(message):
         user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
 
     markup = InlineKeyboardMarkup()
-    btn_approve = InlineKeyboardButton("Onayla ✅", callback_data=f"approve_{user_id}")
-    btn_reject = InlineKeyboardButton("Reddet ❌", callback_data=f"reject_{user_id}")
+    # YENİ: Callback data içine kullanıcının orijinal mesaj ID'sini de (orig_msg_id) ekledik
+    btn_approve = InlineKeyboardButton("Onayla ✅", callback_data=f"approve_{user_id}_{orig_msg_id}")
+    btn_reject = InlineKeyboardButton("Reddet ❌", callback_data=f"reject_{user_id}_{orig_msg_id}")
     markup.add(btn_approve, btn_reject)
 
     admin_text = f"<b>Gönderen:</b> {user_link}\n\n{caption}"
@@ -109,12 +109,10 @@ def handle_callback(call):
             _, msg_id_str, score_str = data.split("_")
             msg_id = int(msg_id_str)
             score = int(score_str)
-            voter_id = str(call.from_user.id) # Veritabanı için string yapıyoruz
+            voter_id = str(call.from_user.id)
             
-            # Veritabanından o anki durumu çek
             doc = votes_col.find_one({"msg_id": msg_id})
             if not doc:
-                # Eğer oylama sandığı yoksa oluştur (Eski mesajlara tıklanırsa çökmemesi için)
                 votes_col.insert_one({"msg_id": msg_id, "voters": {}})
                 msg_votes = {}
             else:
@@ -126,7 +124,6 @@ def handle_callback(call):
                 bot.answer_callback_query(call.id, f"Zaten bu resme {score} puan vermişsiniz!")
                 return
             
-            # Oyu veritabanına kaydet
             msg_votes[voter_id] = score
             votes_col.update_one({"msg_id": msg_id}, {"$set": {"voters": msg_votes}}, upsert=True)
             
@@ -161,8 +158,12 @@ def handle_callback(call):
 
     # --- ONAY / RED KISMI ---
     admin_msg = call.message
-    action = data.split("_")[0]
-    user_id = data.split("_")[1]
+    parts = data.split("_")
+    action = parts[0]
+    user_id = parts[1]
+    
+    # YENİ: Eğer callback içinde mesaj ID varsa alıyoruz
+    orig_msg_id = int(parts[2]) if len(parts) > 2 else None 
     
     plain_caption = admin_msg.caption if admin_msg.caption else ""
     if "\n\n" in plain_caption:
@@ -196,19 +197,28 @@ def handle_callback(call):
                     message_thread_id=TARGET_THREAD_ID
                 )
             
+            post_link = ""
             if sent_msg:
-                # YENİ: Veritabanında bu resim için yeni bir oy sandığı açıyoruz
                 votes_col.insert_one({"msg_id": sent_msg.message_id, "voters": {}})
                 
                 initial_markup = generate_rating_keyboard(sent_msg.message_id)
                 bot.edit_message_reply_markup(chat_id=TARGET_GROUP_ID, message_id=sent_msg.message_id, reply_markup=initial_markup)
 
+                clean_chat_id = str(TARGET_GROUP_ID).replace("-100", "")
+                post_link = f"https://t.me/c/{clean_chat_id}/{sent_msg.message_id}"
+
             bot.edit_message_caption(f"✅ ONAYLANDI\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
             
-            try: bot.send_message(user_id, "🎉 Resim onaylandı, ilgili konuda resminizi bulabilirsiniz.")
+            try: 
+                # YENİ: Kullanıcıya resmini yanıtlayarak onay mesajı ve link atıyoruz
+                bildirim_mesaji = f"🎉 Resminiz onaylandı! Buradaki linkten ulaşabilirsiniz:\n{post_link}"
+                if orig_msg_id:
+                    bot.send_message(user_id, bildirim_mesaji, reply_to_message_id=orig_msg_id)
+                else:
+                    bot.send_message(user_id, bildirim_mesaji)
             except: pass
                 
-            bot.answer_callback_query(call.id, "İçerik paylaşıldı!")
+            bot.answer_callback_query(call.id, "İçerik paylaşıldı ve kullanıcıya iletildi!")
             
         except Exception as e:
             bot.answer_callback_query(call.id, "Hata oluştu!")
@@ -217,7 +227,13 @@ def handle_callback(call):
     elif action == "reject":
         try:
             bot.edit_message_caption(f"❌ REDDEDİLDİ\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
-            try: bot.send_message(user_id, "Resminiz reddedildi.")
+            try: 
+                # YENİ: Kullanıcıya resmini yanıtlayarak ret mesajı atıyoruz
+                red_mesaji = "❌ Maalesef gönderdiğiniz resim reddedildi."
+                if orig_msg_id:
+                    bot.send_message(user_id, red_mesaji, reply_to_message_id=orig_msg_id)
+                else:
+                    bot.send_message(user_id, red_mesaji)
             except: pass
             bot.answer_callback_query(call.id, "İçerik reddedildi.")
         except Exception as e:
@@ -228,7 +244,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Oylama Botu (Kalıcı Hafızalı) Aktif!"
+    return "Oylama Botu (Kalıcı Hafızalı ve Yanıtlamalı) Aktif!"
 
 def run():
     port = int(os.environ.get("PORT", 8080))
@@ -240,5 +256,5 @@ def keep_alive():
 
 if __name__ == "__main__":
     keep_alive() 
-    print("Bot kalıcı MongoDB veritabanı ile başlatıldı!")
+    print("Bot kalıcı veritabanı ve gelişmiş yanıt sistemi ile başlatıldı!")
     bot.infinity_polling()
