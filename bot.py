@@ -5,7 +5,6 @@ from flask import Flask
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- AYARLAR ---
-# Token'ı gizli değişkenden çekiyoruz (GitHub'da görünmeyecek)
 TOKEN = os.environ.get("BOT_TOKEN") 
 ADMIN_GROUP_ID = -1003791676374
 TARGET_GROUP_ID = -1004357691251
@@ -149,17 +148,21 @@ def handle_callback(call):
     action = data.split("_")[0]
     user_id = data.split("_")[1]
     
-    full_caption = admin_msg.caption if admin_msg.caption else ""
-    if "\n\n" in full_caption:
-        original_caption = full_caption.split("\n\n", 1)[1]
+    # 1. Hedef gruba göndermek için HTML'siz, dümdüz metni alıyoruz
+    plain_caption = admin_msg.caption if admin_msg.caption else ""
+    if "\n\n" in plain_caption:
+        original_caption = plain_caption.split("\n\n", 1)[1]
     else:
         original_caption = ""
-        
     original_caption = original_caption.strip()
+
+    # 2. Admin grubunu düzenlemek için HTML korumalı metni alıyoruz (Linkler bozulmaz)
+    html_full_caption = admin_msg.html_caption if admin_msg.html_caption else plain_caption
 
     if action == "approve":
         try:
             sent_msg = None
+            # Hedef gruba gönderilecek temiz metin
             if original_caption:
                 initial_caption = f"{original_caption}\n\n📊 Oylama Sonucu:\n⭐ Henüz oy verilmedi."
             else:
@@ -185,7 +188,8 @@ def handle_callback(call):
                 initial_markup = generate_rating_keyboard(sent_msg.message_id)
                 bot.edit_message_reply_markup(chat_id=TARGET_GROUP_ID, message_id=sent_msg.message_id, reply_markup=initial_markup)
 
-            bot.edit_message_caption(f"✅ ONAYLANDI\n\n{full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
+            # Admin grubundaki mesajı düzenlerken "html_full_caption" kullanıyoruz
+            bot.edit_message_caption(f"✅ ONAYLANDI\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
             
             try:
                 bot.send_message(user_id, "🎉 Resim onaylandı, ilgili konuda resminizi bulabilirsiniz.")
@@ -200,7 +204,8 @@ def handle_callback(call):
 
     elif action == "reject":
         try:
-            bot.edit_message_caption(f"❌ REDDEDİLDİ\n\n{full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
+            # Ret durumunda da aynı şekilde HTML korumalı metni kullanıyoruz
+            bot.edit_message_caption(f"❌ REDDEDİLDİ\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
             try:
                 bot.send_message(user_id, "Resminiz reddedildi.")
             except:
@@ -209,7 +214,7 @@ def handle_callback(call):
         except Exception as e:
             print(f"Reddetme hatası: {e}")
 
-# --- RENDER & UPTIMEROBOT İÇİN WEB SUNUCUSU (KEEP-ALIVE) ---
+# --- RENDER & UPTIMEROBOT İÇİN WEB SUNUCUSU ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -217,7 +222,6 @@ def home():
     return "Telegram Botu Aktif ve Çalışıyor!"
 
 def run():
-    # Render, portu otomatik atar. Bulamazsa 8080'i kullanır.
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
@@ -227,6 +231,6 @@ def keep_alive():
 
 # --- ÇALIŞTIRMA ---
 if __name__ == "__main__":
-    keep_alive() # UptimeRobot'un ping atacağı web sunucusunu başlat
-    print("Bot başlatıldı! Bekleniyor...")
+    keep_alive() 
+    print("Bot tüm düzeltmelerle başlatıldı! Bekleniyor...")
     bot.infinity_polling()
