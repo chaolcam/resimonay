@@ -105,6 +105,33 @@ def send_ranking(message):
         bot.reply_to(message, "Sıralama oluşturulurken bir hata oluştu.")
         print(f"Sıralama hatası: {e}")
 
+# --- YENİ EKLENEN: /sil Komutu (Veritabanı Temizliği) ---
+@bot.message_handler(commands=['sil'])
+def delete_db_record(message):
+    # İsteğe bağlı güvenlik: Komutun sadece Admin grubunda çalışmasını istersen alttaki '#' işaretlerini kaldır
+    # if message.chat.id != ADMIN_GROUP_ID:
+    #     return
+
+    parts = message.text.split()
+    
+    if len(parts) != 2:
+        bot.reply_to(message, "⚠️ Eksik komut girdiniz.\n\n<b>Kullanım:</b> /sil mesaj_id\n<b>Örnek:</b> /sil 1234", parse_mode="HTML")
+        return
+        
+    try:
+        msg_id = int(parts[1])
+        sonuc = votes_col.delete_one({"msg_id": msg_id})
+        
+        if sonuc.deleted_count > 0:
+            bot.reply_to(message, f"✅ <b>Başarılı!</b> {msg_id} ID'li gönderi ve ona ait tüm oylar veritabanından silindi. Artık sıralamada görünmeyecek.", parse_mode="HTML")
+        else:
+            bot.reply_to(message, f"❌ Veritabanında <b>{msg_id}</b> ID'sine ait bir oylama kaydı bulunamadı.", parse_mode="HTML")
+            
+    except ValueError:
+        bot.reply_to(message, "⚠️ Mesaj ID'si sadece rakamlardan oluşmalıdır (Örn: /sil 1234).")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Bir hata oluştu: {e}")
+
 # 3. Özel mesajdan gelenleri yakala
 @bot.message_handler(content_types=['photo', 'video'], chat_types=['private'])
 def handle_media(message):
@@ -146,20 +173,17 @@ def handle_media(message):
     except Exception as e:
         print(f"Hata: {e}")
 
-# 4. YENİ: TARTIŞMA GRUBU YAKALAYICISI
+# 4. TARTIŞMA GRUBU YAKALAYICISI
 @bot.message_handler(content_types=['photo', 'video', 'text'], func=lambda m: getattr(m, 'is_automatic_forward', False))
 def handle_group_forwards(message):
-    # Eğer mesaj kanalımızdan tartışma grubuna otomatik düştüyse
     if message.forward_from_chat and message.forward_from_chat.id == TARGET_CHANNEL_ID:
         channel_msg_id = message.forward_from_message_id
         group_msg_id = message.message_id
         group_chat_id = message.chat.id
         
-        # Kanaldaki güncel butonları oluştur
         markup = generate_rating_keyboard(channel_msg_id)
         
         try:
-            # Gruba düşen o resme yanıt vererek oylama butonlarını bırakıyoruz
             reply_text = "👇 Oylamaya bu tartışma grubundan da katılabilirsiniz 👇"
             reply_msg = bot.send_message(
                 chat_id=group_chat_id, 
@@ -168,7 +192,6 @@ def handle_group_forwards(message):
                 reply_markup=markup
             )
             
-            # Bu yanit mesajının ID'sini veritabanına kaydediyoruz ki oylar gelince güncelleyebilelim
             votes_col.update_one(
                 {"msg_id": channel_msg_id}, 
                 {"$set": {"group_reply_msg_id": reply_msg.message_id, "group_chat_id": group_chat_id}}, 
@@ -211,8 +234,6 @@ def handle_callback(call):
             
             # --- 1. KANALI GÜNCELLEME ---
             try:
-                # Oylamanın atıldığı asıl kanaldaki mesaj (caption varsa) düzenleniyor
-                # (Kanalın caption'ı düzenlenince Telegram bunu gruba da otomatik yansıtır)
                 full_caption = call.message.caption if call.message.caption else ""
                 if "📊 Oylama Sonucu:" in full_caption:
                     base_caption = full_caption.split("📊 Oylama Sonucu:")[0].strip()
@@ -233,12 +254,12 @@ def handle_callback(call):
                     reply_markup=new_markup
                 )
             except Exception as e:
-                pass # Eğer tıklanan buton gruptaysa caption'ı doğrudan bulamayabilir, pas geçer
+                pass 
                 
             new_markup = generate_rating_keyboard(msg_id)
             
             # --- 2. TARTIŞMA GRUBU YANIT MESAJINI GÜNCELLEME ---
-            doc = votes_col.find_one({"msg_id": msg_id}) # Son güncel veriyi tekrar çekiyoruz
+            doc = votes_col.find_one({"msg_id": msg_id}) 
             if doc and "group_reply_msg_id" in doc and "group_chat_id" in doc:
                 try:
                     group_text = f"👇 Oylamaya bu tartışma grubundan da katılabilirsiniz 👇\n\n📊 Oylama Sonucu:\n⭐ Ortalama: {avg_score:.2f} / 10 ({total_votes} oy)"
