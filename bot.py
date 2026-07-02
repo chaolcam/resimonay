@@ -1,6 +1,7 @@
 import telebot
 import os
 import time
+import datetime
 from threading import Thread
 from flask import Flask
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -14,7 +15,6 @@ ADMIN_GROUP_ID = -1003791676374
 TARGET_CHANNEL_ID = -1003977263609 
 CHANNEL_USERNAME = "yorumlapuanla" 
 
-# PATRON (Sınırsız Oy ve Hayalet Modu) ID'Sİ
 PATRON_ID = 7075582251
 
 bot = telebot.TeleBot(TOKEN)
@@ -23,8 +23,91 @@ bot = telebot.TeleBot(TOKEN)
 db_client = pymongo.MongoClient(MONGO_URI)
 db = db_client["oylama_botu_veritabani"]
 votes_col = db["oylar_kanal"] 
+users_col = db["aboneler"] # YENİ: Otomatik mesajlar için abone veritabanı
 
 processed_albums = set()
+
+# --- SESSİZ KAYIT SİSTEMİ ---
+def kullanici_kaydet(user_id):
+    if not user_id: return
+    try:
+        uid = int(user_id)
+        # Sadece gerçek kullanıcı ID'leri pozitif sayıdır (Gruplar eksili olur)
+        if uid > 0 and "PATRON" not in str(user_id):
+            users_col.update_one({"user_id": uid}, {"$set": {"user_id": uid}}, upsert=True)
+    except:
+        pass
+
+# --- HAYALET HASAT MODU (GEÇMİŞİ KURTARMA) ---
+def gecmisi_hasat_et():
+    print("⏳ Eski oylardan kullanıcı kimlikleri hasat ediliyor...")
+    sayac = 0
+    try:
+        all_votes = votes_col.find({})
+        for doc in all_votes:
+            voters = doc.get("voters", {})
+            for v_id in voters.keys():
+                if "PATRON" not in str(v_id):
+                    try:
+                        uid = int(v_id)
+                        if uid > 0:
+                            # Veritabanına sessizce ekle (Eğer yoksa)
+                            res = users_col.update_one({"user_id": uid}, {"$set": {"user_id": uid}}, upsert=True)
+                            if res.upserted_id:
+                                sayac += 1
+                    except:
+                        pass
+        print(f"✅ Hasat Tamamlandı! Eski kayıtlardan '{sayac}' yeni aktif kullanıcı kurtarıldı.")
+    except Exception as e:
+        print(f"Hasat hatası: {e}")
+
+# --- GELİŞMİŞ TOPLU MESAJ MOTORU (ANTI-ÇÖKME) ---
+def toplu_mesaj_gonder(metin):
+    aboneler = users_col.find({})
+    basarili = 0
+    engellemis = 0
+    
+    for abo in aboneler:
+        u_id = abo.get("user_id")
+        if not u_id: continue
+        try:
+            bot.send_message(u_id, metin, parse_mode="HTML")
+            basarili += 1
+            time.sleep(0.05) # Telegram spam (flood) koruması gecikmesi
+        except Exception as e:
+            # Eğer kullanıcı botu engellediyse veya hesabı sildiyse listeden temizle
+            if "blocked" in str(e) or "deactivated" in str(e) or "chat not found" in str(e):
+                users_col.delete_one({"user_id": u_id})
+                engellemis += 1
+                
+    print(f"📢 Yayın Raporu -> Başarılı: {basarili} | Engelleyenler Temizlendi: {engellemis}")
+    return basarili, engellemis
+
+# --- TÜRKİYE SAATİNE GÖRE 18:00 ZAMANLAYICISI ---
+def otomatik_mesaj_dongusu():
+    mesaj_atildi = False
+    print("⏰ 18:00 Otomatik Zamanlayıcı Motoru Çalıştırıldı...")
+    while True:
+        try:
+            # Render sunucusu nerede olursa olsun Türkiye Saatini (UTC+3) hesaplama
+            simdi_utc = datetime.datetime.utcnow()
+            tr_saati = simdi_utc + datetime.timedelta(hours=3)
+            
+            # Her gün tam 18:00'de tetikleme
+            if tr_saati.hour == 18 and tr_saati.minute == 0:
+                if not mesaj_atildi:
+                    uyari_metni = (
+                        "⚠️ <b>Yasal Uyarı:</b> Burada paylaşılan medyalardaki kişilerin rızası ile atıldığı kabul edilir. "
+                        "Doğabilecek olası yasal sorunlardan veya sorumluluklardan bot yönetimi sorumlu değildir."
+                    )
+                    toplu_mesaj_gonder(uyari_metni)
+                    mesaj_atildi = True
+            else:
+                mesaj_atildi = False # Saat 18:01 olunca kilidi aç ki yarın tekrar atabilsin
+                
+            time.sleep(30) # Her 30 saniyede bir saati kontrol et
+        except Exception as e:
+            time.sleep(30)
 
 # --- YARDIMCI FONKSİYON: Puanlama Butonları ---
 def generate_rating_keyboard(message_id):
@@ -50,6 +133,7 @@ def generate_rating_keyboard(message_id):
 # 1. /start Komutu
 @bot.message_handler(commands=['start'], chat_types=['private'])
 def send_welcome(message):
+    kullanici_kaydet(message.from_user.id) # Sessiz kayıt
     welcome_text = (
         "Hoş geldiniz! Bu bot sayesinde gönderdiğiniz resimleri/videoları oylatabilirsiniz. "
         "Lütfen sadece tek bir resim veya video gönderiniz. "
@@ -58,33 +142,49 @@ def send_welcome(message):
         "Doğabilecek olası yasal sorunlardan veya sorumluluklardan bot yönetimi sorumlu değildir.\n\n"
         "🏆 Kanalın en iyilerini görmek için /siralama yazabilirsiniz!"
     )
-    try:
-        bot.reply_to(message, welcome_text, parse_mode="HTML")
-    except Exception as e:
-        pass
+    try: bot.reply_to(message, welcome_text, parse_mode="HTML")
+    except: pass
 
-# 2. /siralama Komutu
+# 2. Admin Manuel Toplu Mesaj Komutu (/mesaj)
+@bot.message_handler(commands=['mesaj'])
+def admin_manuel_mesaj(message):
+    # Güvenlik: Sadece senin belirttiğin admin grubunda çalışır
+    if message.chat.id != ADMIN_GROUP_ID:
+        return
+        
+    parts = message.text.split(" ", 1)
+    if len(parts) < 2:
+        bot.reply_to(message, "⚠️ Metin girmeyi unuttunuz!\n\n<b>Kullanım:</b> <code>/mesaj İletilecek Mesaj Metni</code>", parse_mode="HTML")
+        return
+        
+    yayin_metni = parts[1].strip()
+    durum = bot.reply_to(message, "⏳ Toplu mesaj yayını başlatıldı, lütfen bekleyiniz...")
+    
+    basarili, engellemis = toplu_mesaj_gonder(yayin_metni)
+    
+    try:
+        bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=durum.message_id,
+            text=f"📢 <b>Yayın Tamamlandı!</b>\n\n✅ Ulaşan: <code>{basarili}</code> kullanıcı\n❌ Engelleyen/Silinen: <code>{engellemis}</code> kullanıcı (Veritabanından temizlendi)",
+            parse_mode="HTML"
+        )
+    except: pass
+
+# 3. /siralama Komutu
 @bot.message_handler(commands=['siralama'])
 def send_ranking(message):
+    kullanici_kaydet(message.from_user.id)
     try:
         all_votes = votes_col.find({})
         ranking_data = []
-
         for doc in all_votes:
             msg_id = doc.get("msg_id")
             voters = doc.get("voters", {})
-            
-            if not voters:
-                continue
-            
+            if not voters: continue
             total_votes = len(voters)
             avg_score = sum(voters.values()) / total_votes
-            
-            ranking_data.append({
-                "msg_id": msg_id,
-                "avg_score": avg_score,
-                "total_votes": total_votes
-            })
+            ranking_data.append({"msg_id": msg_id, "avg_score": avg_score, "total_votes": total_votes})
         
         if not ranking_data:
             bot.reply_to(message, "Henüz hiç oy alan gönderi bulunmuyor.")
@@ -94,47 +194,39 @@ def send_ranking(message):
         top_10 = ranking_data[:10]
         
         text = "🏆 <b>En Yüksek Puanlı Gönderiler (Top 10)</b> 🏆\n\n"
-        
         for i, data in enumerate(top_10, 1):
             msg_id = data["msg_id"]
             avg = data["avg_score"]
             votes_count = data["total_votes"]
             link = f"https://t.me/{CHANNEL_USERNAME}/{msg_id}"
-            
             text += f"<b>{i}.</b> <a href='{link}'>Gönderiye Git</a> - ⭐ {avg:.2f} <i>({votes_count} oy)</i>\n"
             
         bot.reply_to(message, text, parse_mode="HTML", disable_web_page_preview=True)
-        
-    except Exception as e:
+    except:
         bot.reply_to(message, "Sıralama oluşturulurken bir hata oluştu.")
-        print(f"Sıralama hatası: {e}")
 
-# /sil Komutu (Veritabanı Temizliği)
+# /sil Komutu
 @bot.message_handler(commands=['sil'])
 def delete_db_record(message):
     parts = message.text.split()
     if len(parts) != 2:
-        bot.reply_to(message, "⚠️ Eksik komut girdiniz.\n\n<b>Kullanım:</b> /sil mesaj_id\n<b>Örnek:</b> /sil 1234", parse_mode="HTML")
+        bot.reply_to(message, "⚠️ Eksik komut girdiniz.\n\n<b>Kullanım:</b> /sil mesaj_id", parse_mode="HTML")
         return
-        
     try:
         msg_id = int(parts[1])
         sonuc = votes_col.delete_one({"msg_id": msg_id})
-        
         if sonuc.deleted_count > 0:
-            bot.reply_to(message, f"✅ <b>Başarılı!</b> {msg_id} ID'li gönderi ve ona ait tüm oylar veritabanından silindi.", parse_mode="HTML")
+            bot.reply_to(message, f"✅ <b>Başarılı!</b> {msg_id} ID'li gönderi veritabanından silindi.", parse_mode="HTML")
         else:
-            bot.reply_to(message, f"❌ Veritabanında <b>{msg_id}</b> ID'sine ait kayıt bulunamadı.", parse_mode="HTML")
-            
-    except ValueError:
-        bot.reply_to(message, "⚠️ Mesaj ID'si sadece rakamlardan oluşmalıdır.")
-    except Exception as e:
+            bot.reply_to(message, f"❌ Veritabanında kayıt bulunamadı.", parse_mode="HTML")
+    except:
         pass
 
-# 3. Özel mesajdan gelenleri yakala
+# Özel mesajdan gelen resimleri/videoları yakala
 @bot.message_handler(content_types=['photo', 'video'], chat_types=['private'])
 def handle_media(message):
     user_id = message.chat.id
+    kullanici_kaydet(user_id) # Sessiz kayıt
     caption = message.caption if message.caption else ""
     user_name = str(message.from_user.first_name).replace("<", "").replace(">", "")
     orig_msg_id = message.message_id  
@@ -142,64 +234,42 @@ def handle_media(message):
     if message.media_group_id:
         if message.media_group_id not in processed_albums:
             processed_albums.add(message.media_group_id)
-            try:
-                bot.reply_to(message, "⚠️ Lütfen medyaları albüm olarak değil, tek tek gönderiniz.")
-            except:
-                pass
+            try: bot.reply_to(message, "⚠️ Lütfen medyaları albüm olarak değil, tek tek gönderiniz.")
+            except: pass
         return
 
-    if message.from_user.username:
-        user_link = f"@{message.from_user.username}"
-    else:
-        user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
-
+    user_link = f"@{message.from_user.username}" if message.from_user.username else f'<a href="tg://user?id={user_id}">{user_name}</a>'
     markup = InlineKeyboardMarkup()
     btn_approve = InlineKeyboardButton("Onayla ✅", callback_data=f"approve_{user_id}_{orig_msg_id}")
     btn_reject = InlineKeyboardButton("Reddet ❌", callback_data=f"reject_{user_id}_{orig_msg_id}")
     markup.add(btn_approve, btn_reject)
 
     admin_text = f"<b>Gönderen:</b> {user_link}\n\n{caption}"
-    
     try:
         if message.content_type == 'photo':
-            file_id = message.photo[-1].file_id
-            bot.send_photo(ADMIN_GROUP_ID, file_id, caption=admin_text, reply_markup=markup, parse_mode='HTML')
+            bot.send_photo(ADMIN_GROUP_ID, message.photo[-1].file_id, caption=admin_text, reply_markup=markup, parse_mode='HTML')
         elif message.content_type == 'video':
-            file_id = message.video.file_id
-            bot.send_video(ADMIN_GROUP_ID, file_id, caption=admin_text, reply_markup=markup, parse_mode='HTML')
-            
+            bot.send_video(ADMIN_GROUP_ID, message.video.file_id, caption=admin_text, reply_markup=markup, parse_mode='HTML')
         bot.reply_to(message, "Resminiz adminlerimize iletilmiştir, lütfen bekleyiniz.")
     except Exception as e:
         print(f"Hata: {e}")
 
-# 4. TARTIŞMA GRUBU YAKALAYICISI
+# TARTIŞMA GRUBU YAKALAYICISI
 @bot.message_handler(content_types=['photo', 'video', 'text'], func=lambda m: getattr(m, 'is_automatic_forward', False))
 def handle_group_forwards(message):
     if message.forward_from_chat and message.forward_from_chat.id == TARGET_CHANNEL_ID:
         channel_msg_id = message.forward_from_message_id
         group_msg_id = message.message_id
         group_chat_id = message.chat.id
-        
         markup = generate_rating_keyboard(channel_msg_id)
-        
         try:
             reply_text = "👇 Oylamaya bu tartışma grubundan da katılabilirsiniz 👇"
-            reply_msg = bot.send_message(
-                chat_id=group_chat_id, 
-                text=reply_text, 
-                reply_to_message_id=group_msg_id, 
-                reply_markup=markup
-            )
-            
-            votes_col.update_one(
-                {"msg_id": channel_msg_id}, 
-                {"$set": {"group_reply_msg_id": reply_msg.message_id, "group_chat_id": group_chat_id}}, 
-                upsert=True
-            )
-        except Exception as e:
+            reply_msg = bot.send_message(chat_id=group_chat_id, text=reply_text, reply_to_message_id=group_msg_id, reply_markup=markup)
+            votes_col.update_one({"msg_id": channel_msg_id}, {"$set": {"group_reply_msg_id": reply_msg.message_id, "group_chat_id": group_chat_id}}, upsert=True)
+        except:
             pass
 
-# 5. Buton tıklamalarını işleme
+# Buton tıklamalarını işleme
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     data = call.data
@@ -212,7 +282,8 @@ def handle_callback(call):
             score = int(score_str)
             real_user_id = call.from_user.id
             
-            # PATRON İÇİN BENZERSİZ KİMLİK OLUŞTURMA (Sınırsız Oy)
+            kullanici_kaydet(real_user_id) # Sessiz kayıt
+            
             if real_user_id == PATRON_ID:
                 voter_id = f"PATRON_{int(time.time() * 1000)}"
             else:
@@ -221,17 +292,14 @@ def handle_callback(call):
             doc = votes_col.find_one({"msg_id": msg_id})
             msg_votes = doc.get("voters", {}) if doc else {}
             voter_names = doc.get("voter_names", {}) if doc else {}
-                
             current_vote = msg_votes.get(voter_id)
             
-            # SADECE NORMAL KULLANICILARA "ZATEN OY VERDİN" UYARISI
             if real_user_id != PATRON_ID and current_vote == score:
                 bot.answer_callback_query(call.id, f"Zaten bu resme {score} puan vermişsiniz!")
                 return
             
             msg_votes[voter_id] = score
             
-            # HAYALET MODU: Patronun ismini "GHOST" olarak kaydet, diğerlerini normal kaydet
             if real_user_id == PATRON_ID:
                 voter_names[voter_id] = "GHOST"
             else:
@@ -239,58 +307,43 @@ def handle_callback(call):
                 voter_names[voter_id] = f'<a href="tg://user?id={real_user_id}">{isim}</a>'
             
             votes_col.update_one({"msg_id": msg_id}, {"$set": {"voters": msg_votes, "voter_names": voter_names}}, upsert=True)
-            
             total_votes = len(msg_votes)
             avg_score = sum(msg_votes.values()) / total_votes
             
-            # --- 1. KANALI GÜNCELLEME ---
+            # Kanal Güncelleme
             try:
                 full_caption = call.message.caption if call.message.caption else ""
-                if "📊 Oylama Sonucu:" in full_caption:
-                    base_caption = full_caption.split("📊 Oylama Sonucu:")[0].strip()
-                else:
-                    base_caption = full_caption.strip()
-                
+                base_caption = full_caption.split("📊 Oylama Sonucu:")[0].strip() if "📊 Oylama Sonucu:" in full_caption else full_caption.strip()
                 new_caption = f"{base_caption}\n\n📊 Oylama Sonucu:\n⭐ Ortalama: {avg_score:.2f} / 10 ({total_votes} oy)" if base_caption else f"📊 Oylama Sonucu:\n⭐ Ortalama: {avg_score:.2f} / 10 ({total_votes} oy)"
                 new_markup = generate_rating_keyboard(msg_id)
-                
                 bot.edit_message_caption(chat_id=TARGET_CHANNEL_ID, message_id=msg_id, caption=new_caption, reply_markup=new_markup)
-            except Exception:
-                pass 
+            except: pass 
                 
             new_markup = generate_rating_keyboard(msg_id)
             
-            # --- 2. TARTIŞMA GRUBU YANIT MESAJINI GÜNCELLEME ---
+            # Tartışma Grubu Güncelleme
             if doc and "group_reply_msg_id" in doc and "group_chat_id" in doc:
                 try:
                     group_text = f"👇 Oylamaya bu tartışma grubundan da katılabilirsiniz 👇\n\n📊 Oylama Sonucu:\n⭐ Ortalama: {avg_score:.2f} / 10 ({total_votes} oy)"
                     bot.edit_message_text(chat_id=doc["group_chat_id"], message_id=doc["group_reply_msg_id"], text=group_text, reply_markup=new_markup)
-                except Exception:
-                    pass
+                except: pass
 
-            # --- 3. ADMİN LOG MESAJINI GÜNCELLEME (HAYALET MODU FİLTRESİ) ---
+            # Admin Log Mesajı Güncelleme
             if doc and "log_msg_id" in doc and "log_chat_id" in doc:
                 log_text = f"📊 <b>Güncel Oylama Durumu (Toplam: {total_votes} Oy)</b>\n\n"
                 has_visible_vote = False
-                
                 for v_id, v_score in msg_votes.items():
                     v_name = voter_names.get(v_id, "Bilinmeyen")
-                    if v_name != "GHOST": # Patronun oyları listede gizlenir
+                    if v_name != "GHOST":
                         log_text += f"👤 {v_name}: {v_score} Puan\n"
                         has_visible_vote = True
-                
-                if not has_visible_vote:
-                    log_text += "<i>Henüz görünür bir oy yok...</i>"
-                    
-                try:
-                    bot.edit_message_text(chat_id=doc["log_chat_id"], message_id=doc["log_msg_id"], text=log_text, parse_mode="HTML", disable_web_page_preview=True)
-                except Exception:
-                    pass
+                if not has_visible_vote: log_text += "<i>Henüz görünür bir oy yok...</i>"
+                try: bot.edit_message_text(chat_id=doc["log_chat_id"], message_id=doc["log_msg_id"], text=log_text, parse_mode="HTML", disable_web_page_preview=True)
+                except: pass
 
             bot.answer_callback_query(call.id, f"Başarılı: {score} puan verdiniz!")
-            
-        except Exception as e:
-            bot.answer_callback_query(call.id, "Puanınız işlenirken bir hata oluştu.")
+        except:
+            bot.answer_callback_query(call.id, "Bir hata oluştu.")
         return
 
     # --- ONAY / RED KISMI ---
@@ -300,20 +353,16 @@ def handle_callback(call):
     user_id = parts[1]
     orig_msg_id = int(parts[2]) if len(parts) > 2 else None 
     
+    kullanici_kaydet(user_id) # Onay aşamasında da sessiz kayıt tetikle
+    
     plain_caption = admin_msg.caption if admin_msg.caption else ""
-    if "\n\n" in plain_caption:
-        original_caption = plain_caption.split("\n\n", 1)[1]
-    else:
-        original_caption = ""
-    original_caption = original_caption.strip()
-
+    original_caption = plain_caption.split("\n\n", 1)[1].strip() if "\n\n" in plain_caption else ""
     html_full_caption = admin_msg.html_caption if admin_msg.html_caption else plain_caption
 
     if action == "approve":
         try:
             sent_msg = None
             initial_caption = f"{original_caption}\n\n📊 Oylama Sonucu:\n⭐ Henüz oy verilmedi." if original_caption else "📊 Oylama Sonucu:\n⭐ Henüz oy verilmedi."
-            
             if admin_msg.content_type == 'photo':
                 sent_msg = bot.send_photo(TARGET_CHANNEL_ID, admin_msg.photo[-1].file_id, caption=initial_caption)
             elif admin_msg.content_type == 'video':
@@ -321,38 +370,21 @@ def handle_callback(call):
             
             post_link = ""
             if sent_msg:
-                # ADMİN GRUBUNA CANLI LOG MESAJINI GÖNDER VE İLİŞKİLENDİR
-                log_msg = bot.send_message(
-                    chat_id=admin_msg.chat.id, 
-                    text="📊 <b>Güncel Oylama Durumu</b>\n<i>Henüz oy verilmedi...</i>", 
-                    reply_to_message_id=admin_msg.message_id, 
-                    parse_mode="HTML"
-                )
-                
-                votes_col.insert_one({
-                    "msg_id": sent_msg.message_id, 
-                    "voters": {},
-                    "voter_names": {},
-                    "log_msg_id": log_msg.message_id,
-                    "log_chat_id": admin_msg.chat.id
-                })
-                
+                log_msg = bot.send_message(chat_id=admin_msg.chat.id, text="📊 <b>Güncel Oylama Durumu</b>\n<i>Henüz oy verilmedi...</i>", reply_to_message_id=admin_msg.message_id, parse_mode="HTML")
+                votes_col.insert_one({"msg_id": sent_msg.message_id, "voters": {}, "voter_names": {}, "log_msg_id": log_msg.message_id, "log_chat_id": admin_msg.chat.id})
                 initial_markup = generate_rating_keyboard(sent_msg.message_id)
                 bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=sent_msg.message_id, reply_markup=initial_markup)
                 post_link = f"https://t.me/{CHANNEL_USERNAME}/{sent_msg.message_id}"
 
             bot.edit_message_caption(f"✅ ONAYLANDI\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
-            
             try: 
                 bildirim_mesaji = f"🎉 Resminiz onaylandı ve kanalımızda paylaşıldı!\n\nBuradaki linkten ulaşabilirsiniz:\n{post_link}"
                 if orig_msg_id: bot.send_message(user_id, bildirim_mesaji, reply_to_message_id=orig_msg_id)
                 else: bot.send_message(user_id, bildirim_mesaji)
             except: pass
-                
             bot.answer_callback_query(call.id, "İçerik kanalda paylaşıldı!")
-            
-        except Exception as e:
-            bot.answer_callback_query(call.id, "Hata! Botun kanalda admin olup olmadığını kontrol edin.")
+        except:
+            bot.answer_callback_query(call.id, "Hata oluştu.")
 
     elif action == "reject":
         try:
@@ -363,25 +395,26 @@ def handle_callback(call):
                 else: bot.send_message(user_id, red_mesaji)
             except: pass
             bot.answer_callback_query(call.id, "İçerik reddedildi.")
-        except Exception:
-            pass
+        except: pass
 
 # --- RENDER & UPTIMEROBOT İÇİN WEB SUNUCUSU ---
 app = Flask(__name__)
-
 @app.route('/')
-def home():
-    return "Oylama Botu Patron Moduyla Aktif!"
+def home(): return "Oylama Botu Patron & Yayın Moduyla Aktif!"
 
 def run():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
 if __name__ == "__main__":
-    keep_alive() 
-    print("Bot Patron Modu ve Canlı Log sistemiyle başlatıldı!")
+    # Web sunucusunu başlat
+    Thread(target=run, daemon=True).start()
+    
+    # Geçmişteki tüm aktif kullanıcıları hasat et (Tek Seferlik Kurtarma Operasyonu)
+    gecmisi_hasat_et()
+    
+    # Her gün saat 18:00 otomatik mesaj kontrol arka plan thread'ini başlat
+    Thread(target=otomatik_mesaj_dongusu, daemon=True).start()
+    
+    print("Bot Patron Modu, Hasat Altyapısı ve 18:00 Zamanlayıcısıyla Başlatıldı!")
     bot.infinity_polling()
