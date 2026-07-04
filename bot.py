@@ -113,7 +113,7 @@ def sec_haftanin_birincisi():
     votes_col.update_one({"_id": winner["_id"]}, {"$set": {"is_weekly_winner": True}})
     
     link = f"https://t.me/{CHANNEL_USERNAME}/{winner['msg_id']}"
-    metin = f"🏆 <b>HAFTANIN BİRİNCİSİ</b> 🏆\n\n⭐ Ortalama Puan: {winner['avg_score']:.2f} <i>({winner['total_votes']} oy)</i>\n\nBu muhteşem gönderiyi tekrar görmek için tıklayın: {link}\n\n👇 <i>Sen de fotoğrafını oylatmak istiyorsan @resimonaybot'a mesaj gönderebilirsin!</i>"
+    metin = f"🏆 <b>HAFTANIN BİRİNCİSİ</b> 🏆\n\n⭐ Güven Puanı: {winner['bayesian_score']:.2f} <i>({winner['total_votes']} oy)</i>\n\nBu muhteşem gönderiyi tekrar görmek için tıklayın: {link}\n\n👇 <i>Sen de fotoğrafını oylatmak istiyorsan @resimonaybot'a mesaj gönderebilirsin!</i>"
     
     try:
         sent_msg = bot.send_message(TARGET_CHANNEL_ID, metin, parse_mode="HTML", disable_web_page_preview=True)
@@ -234,7 +234,7 @@ def send_ranking(message):
         text = "🏆 <b>En Yüksek Puanlı Gönderiler (Top 10)</b> 🏆\n\n"
         for i, data in enumerate(top_10, 1):
             msg_id = data["msg_id"]
-            avg = data["avg_score"]
+            avg = data["bayesian_score"]
             votes_count = data["total_votes"]
             link = f"https://t.me/{CHANNEL_USERNAME}/{msg_id}"
             text += f"<b>{i}.</b> <a href='{link}'>Gönderiye Git</a> - ⭐ {avg:.2f} <i>({votes_count} oy)</i>\n"
@@ -385,11 +385,12 @@ def handle_callback(call):
             votes_col.update_one({"msg_id": msg_id}, {"$set": {"voters": msg_votes, "voter_names": voter_names}}, upsert=True)
             total_votes = len(msg_votes)
             avg_score = sum(msg_votes.values()) / total_votes
+            bayesian_score = (total_votes * avg_score + 20 * 6.0) / (total_votes + 20)
             
             try:
                 full_caption = call.message.caption if call.message.caption else ""
                 base_caption = full_caption.split("📊 Oylama Sonucu:")[0].strip() if "📊 Oylama Sonucu:" in full_caption else full_caption.strip()
-                new_caption = f"{base_caption}\n\n📊 Oylama Sonucu:\n⭐ Ortalama: {avg_score:.2f} / 10 ({total_votes} oy)" if base_caption else f"📊 Oylama Sonucu:\n⭐ Ortalama: {avg_score:.2f} / 10 ({total_votes} oy)"
+                new_caption = f"{base_caption}\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)" if base_caption else f"📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
                 new_markup = generate_rating_keyboard(msg_id)
                 bot.edit_message_caption(chat_id=TARGET_CHANNEL_ID, message_id=msg_id, caption=new_caption, reply_markup=new_markup)
             except: pass 
@@ -397,7 +398,7 @@ def handle_callback(call):
             new_markup = generate_rating_keyboard(msg_id)
             if doc and "group_reply_msg_id" in doc and "group_chat_id" in doc:
                 try:
-                    group_text = f"👇 Oylamaya bu tartışma grubundan da katılabilirsiniz 👇\n\n📊 Oylama Sonucu:\n⭐ Ortalama: {avg_score:.2f} / 10 ({total_votes} oy)"
+                    group_text = f"👇 Oylamaya bu tartışma grubundan da katılabilirsiniz 👇\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
                     bot.edit_message_text(chat_id=doc["group_chat_id"], message_id=doc["group_reply_msg_id"], text=group_text, reply_markup=new_markup)
                 except: pass
 
