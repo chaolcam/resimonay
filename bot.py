@@ -1,4 +1,4 @@
-import telebot
+port telebot
 import os
 import time
 import datetime
