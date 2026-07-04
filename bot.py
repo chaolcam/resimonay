@@ -478,7 +478,8 @@ if __name__ == "__main__":
     Thread(target=run, daemon=True).start()
     
     # Geçmişteki tüm aktif kullanıcıları hasat et (Tek Seferlik Kurtarma Operasyonu)
-    gecmisi_hasat_et()
+    Thread(target=gecmisi_hasat_et, daemon=True).start()
+
     
     # Her gün saat 18:00 otomatik mesaj kontrol arka plan thread'ini başlat
     Thread(target=otomatik_mesaj_dongusu, daemon=True).start()
