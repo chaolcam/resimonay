@@ -23,7 +23,9 @@ bot = telebot.TeleBot(TOKEN)
 db_client = pymongo.MongoClient(MONGO_URI)
 db = db_client["oylama_botu_veritabani"]
 votes_col = db["oylar_kanal"] 
-users_col = db["aboneler"] # YENİ: Otomatik mesajlar için abone veritabanı
+users_col = db["aboneler"]
+bans_col = db["yasaklananlar"]
+spam_col = db["spam_korumasi"] # YENİ: Otomatik mesajlar için abone veritabanı
 
 processed_albums = set()
 
@@ -84,6 +86,49 @@ def toplu_mesaj_gonder(metin):
     return basarili, engellemis
 
 # --- TÜRKİYE SAATİNE GÖRE 18:00 ZAMANLAYICISI ---
+
+def sec_haftanin_birincisi():
+    all_votes = votes_col.find({})
+    simdi = datetime.datetime.utcnow()
+    gecen_hafta = simdi - datetime.timedelta(days=7)
+    
+    ranking_data = []
+    for doc in all_votes:
+        created_at = doc.get("created_at")
+        if created_at is None:
+            pass # 29 Haziran'da açıldığı için eskileri de kabul et
+        elif created_at < gecen_hafta:
+            continue
+            
+        if doc.get("is_weekly_winner"):
+            continue
+            
+        voters = doc.get("voters", {})
+        if not voters: continue
+        total_votes = len(voters)
+        avg_score = sum(voters.values()) / total_votes
+        
+        if total_votes >= 1: # En az 1 oy almalı
+            bayesian_score = (total_votes * avg_score + 20 * 6.0) / (total_votes + 20)
+            ranking_data.append({"msg_id": doc.get("msg_id"), "avg_score": avg_score, "total_votes": total_votes, "_id": doc["_id"], "bayesian_score": bayesian_score})
+            
+    if not ranking_data:
+        return
+        
+    ranking_data.sort(key=lambda x: (x["bayesian_score"], x["total_votes"]), reverse=True)
+    winner = ranking_data[0]
+    
+    votes_col.update_one({"_id": winner["_id"]}, {"$set": {"is_weekly_winner": True}})
+    
+    link = f"https://t.me/{CHANNEL_USERNAME}/{winner['msg_id']}"
+    metin = f"🏆 <b>HAFTANIN BİRİNCİSİ</b> 🏆\n\n⭐ Ortalama Puan: {winner['avg_score']:.2f} <i>({winner['total_votes']} oy)</i>\n\nBu muhteşem gönderiyi tekrar görmek için tıklayın: {link}\n\n👇 <i>Sen de fotoğrafını oylatmak istiyorsan @resimonaybot'a mesaj gönderebilirsin!</i>"
+    
+    try:
+        sent_msg = bot.send_message(TARGET_CHANNEL_ID, metin, parse_mode="HTML", disable_web_page_preview=True)
+        bot.pin_chat_message(chat_id=TARGET_CHANNEL_ID, message_id=sent_msg.message_id)
+    except Exception as e:
+        print("Mesaj atma veya sabitleme hatası:", e)
+
 def otomatik_mesaj_dongusu():
     mesaj_atildi = False
     print("⏰ 18:00 Otomatik Zamanlayıcı Motoru Çalıştırıldı...")
@@ -371,12 +416,12 @@ def handle_callback(call):
             post_link = ""
             if sent_msg:
                 log_msg = bot.send_message(chat_id=admin_msg.chat.id, text="📊 <b>Güncel Oylama Durumu</b>\n<i>Henüz oy verilmedi...</i>", reply_to_message_id=admin_msg.message_id, parse_mode="HTML")
-                votes_col.insert_one({"msg_id": sent_msg.message_id, "voters": {}, "voter_names": {}, "log_msg_id": log_msg.message_id, "log_chat_id": admin_msg.chat.id})
+                votes_col.insert_one({"msg_id": sent_msg.message_id, "voters": {}, "voter_names": {}, "log_msg_id": log_msg.message_id, "log_chat_id": admin_msg.chat.id, "created_at": datetime.datetime.utcnow()})
                 initial_markup = generate_rating_keyboard(sent_msg.message_id)
                 bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=sent_msg.message_id, reply_markup=initial_markup)
                 post_link = f"https://t.me/{CHANNEL_USERNAME}/{sent_msg.message_id}"
 
-            bot.edit_message_caption(f"✅ ONAYLANDI\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
+            bot.edit_message_caption(f"✅ {call.from_user.first_name} Tarafından ONAYLANDI\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
             try: 
                 bildirim_mesaji = f"🎉 Resminiz onaylandı ve kanalımızda paylaşıldı!\n\nBuradaki linkten ulaşabilirsiniz:\n{post_link}"
                 if orig_msg_id: bot.send_message(user_id, bildirim_mesaji, reply_to_message_id=orig_msg_id)
@@ -388,7 +433,9 @@ def handle_callback(call):
 
     elif action == "reject":
         try:
-            bot.edit_message_caption(f"❌ REDDEDİLDİ\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
+            isim = str(call.from_user.first_name).replace('<', '').replace('>', '')
+            etiket = f'<a href="tg://user?id={call.from_user.id}">{isim}</a>'
+            bot.edit_message_caption(f"❌ {etiket} Tarafından REDDEDİLDİ\n\n{html_full_caption}", chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
             try: 
                 red_mesaji = "❌ Maalesef gönderdiğiniz resim reddedildi."
                 if orig_msg_id: bot.send_message(user_id, red_mesaji, reply_to_message_id=orig_msg_id)
@@ -396,6 +443,26 @@ def handle_callback(call):
             except: pass
             bot.answer_callback_query(call.id, "İçerik reddedildi.")
         except: pass
+
+    elif action == "banuser":
+        if str(user_id) == str(PATRON_ID):
+            bot.answer_callback_query(call.id, "Patron banlanamaz!", show_alert=True)
+            return
+        bans_col.update_one({"user_id": int(user_id)}, {"$set": {"user_id": int(user_id)}}, upsert=True)
+        
+        # Etiketlemek için HTML link kullanıyoruz
+        isim = str(call.from_user.first_name).replace("<", "").replace(">", "")
+        etiket = f'<a href="tg://user?id={call.from_user.id}">{isim}</a>'
+        
+        yeni_baslik = f"🚫 {etiket} Tarafından BANLANDI (Kullanıcı Yasaklandı)\n\n{html_full_caption}"
+        if len(yeni_baslik) > 1024:
+            yeni_baslik = yeni_baslik[:1020] + "..."
+            
+        try: bot.edit_message_caption(yeni_baslik, chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None, parse_mode='HTML')
+        except: 
+            try: bot.edit_message_reply_markup(chat_id=admin_msg.chat.id, message_id=admin_msg.message_id, reply_markup=None)
+            except: pass
+        bot.answer_callback_query(call.id, "Kullanıcı banlandı ve uzaklaştırıldı.", show_alert=True)
 
 # --- RENDER & UPTIMEROBOT İÇİN WEB SUNUCUSU ---
 app = Flask(__name__)
