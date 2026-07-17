@@ -418,6 +418,28 @@ def delete_db_record(message):
     except:
         pass
 
+# /unban Komutu
+@bot.message_handler(commands=['unban'])
+def unban_user(message):
+    if message.chat.id != ADMIN_GROUP_ID and message.from_user.id != PATRON_ID:
+        return
+        
+    parts = message.text.split()
+    if len(parts) != 2:
+        bot.reply_to(message, "⚠️ Eksik komut girdiniz.\n\n<b>Kullanım:</b> /unban user_id", parse_mode="HTML")
+        return
+    try:
+        user_id = int(parts[1])
+        sonuc = bans_col.delete_one({"user_id": user_id})
+        if sonuc.deleted_count > 0:
+            bot.reply_to(message, f"✅ <b>Başarılı!</b> <code>{user_id}</code> ID'li kullanıcının yasağı kaldırıldı.", parse_mode="HTML")
+        else:
+            bot.reply_to(message, f"❌ Veritabanında bu ID'ye ait yasaklama bulunamadı.", parse_mode="HTML")
+    except ValueError:
+        bot.reply_to(message, "⚠️ Geçersiz ID formatı. Lütfen sayısal bir ID girin.", parse_mode="HTML")
+    except Exception:
+        pass
+
 # Özel mesajdan gelen resimleri/videoları yakala
 @bot.message_handler(content_types=['photo', 'video'], chat_types=['private'])
 def handle_media(message):
