@@ -26,6 +26,7 @@ votes_col = db["oylar_kanal"]
 users_col = db["aboneler"]
 bans_col = db["yasaklananlar"]
 spam_col = db["spam_korumasi"] 
+monthly_polls_col = db["ayin_birincisi_oylamalari"]
 
 processed_albums = set()
 
@@ -116,19 +117,176 @@ def sec_haftanin_birincisi():
     metin = f"🏆 <b>HAFTANIN BİRİNCİSİ</b> 🏆\n\n⭐ Güven Puanı: {winner['bayesian_score']:.2f} <i>({winner['total_votes']} oy)</i>\n\nBu muhteşem gönderiyi tekrar görmek için tıklayın: {link}\n\n👇 <i>Sen de fotoğrafını oylatmak istiyorsan @resimonaybot'a mesaj gönderebilirsin!</i>"
     
     try:
-        sent_msg = bot.send_message(TARGET_CHANNEL_ID, metin, parse_mode="HTML", disable_web_page_preview=True)
+        sent_msg = bot.copy_message(TARGET_CHANNEL_ID, TARGET_CHANNEL_ID, winner['msg_id'], caption=metin, parse_mode="HTML")
         bot.pin_chat_message(chat_id=TARGET_CHANNEL_ID, message_id=sent_msg.message_id)
     except Exception as e:
         print("Mesaj atma veya sabitleme hatası:", e)
 
+def is_monthly_poll_day(date_obj):
+    if date_obj.weekday() != 0: return False
+    dun = date_obj - datetime.timedelta(days=1)
+    haftaya = dun + datetime.timedelta(days=7)
+    return haftaya.month != dun.month
+
+aylar = {
+    1: "OCAK", 2: "ŞUBAT", 3: "MART",
+    4: "NİSAN", 5: "MAYIS", 6: "HAZİRAN",
+    7: "TEMMUZ", 8: "AĞUSTOS", 9: "EYLÜL",
+    10: "EKİM", 11: "KASIM", 12: "ARALIK"
+}
+
+def baslat_ayin_birincisi_oylamasi():
+    simdi = datetime.datetime.utcnow()
+    
+    sampiyonlar = list(votes_col.find({
+        "is_weekly_winner": True,
+        "is_in_monthly_poll": {"$ne": True},
+        "created_at": {"$lte": simdi}
+    }).sort([("created_at", 1)]).limit(5))
+    
+    if len(sampiyonlar) < 2:
+        try: bot.send_message(ADMIN_GROUP_ID, "⚠️ Aylık şampiyonlar ligi başlatılamadı çünkü henüz oylanmamış yeterli aday bulunamadı.")
+        except: pass
+        return
+        
+    ay_ismi = aylar.get(simdi.month, "BU AY")
+    ay_ismi_kucuk = ay_ismi.lower()
+    aday_sayisi = len(sampiyonlar)
+    
+    for doc in sampiyonlar:
+        votes_col.update_one({"_id": doc["_id"]}, {"$set": {"is_in_monthly_poll": True}})
+        
+    poll_id = f"poll_{simdi.timestamp()}"
+    SURE_METNI = "1 Gün"
+    
+    duyuru_metni = f"🏆 <b>{ay_ismi} AYININ ŞAMPİYONLAR LİGİ BAŞLADI!</b> 🏆\n\nKanalın {ay_ismi_kucuk} ayında gelmiş geçmiş en iyi Top {aday_sayisi} fotoğrafı kapışıyor. Yalnızca <b>1 adaya</b> oy verebilirsiniz. \n⏱️ Oylama {SURE_METNI} sürecek!\n\n👇 <i>Favori şampiyonuna oyunu ver!</i>"
+    try: 
+        sent_duyuru = bot.send_message(TARGET_CHANNEL_ID, duyuru_metni, parse_mode="HTML")
+        duyuru_msg_id = sent_duyuru.message_id
+        try: bot.pin_chat_message(TARGET_CHANNEL_ID, duyuru_msg_id)
+        except: pass
+    except Exception as e: 
+        try: bot.send_message(ADMIN_GROUP_ID, f"Duyuru atılamadı: {e}")
+        except: pass
+        return
+    
+    channel_msg_ids = []
+    for i, doc in enumerate(sampiyonlar):
+        orig_msg_id = doc["msg_id"]
+        aday_duyuru = f"👑 <a href='https://t.me/{CHANNEL_USERNAME}/{orig_msg_id}'><b>Aday {i+1}</b></a>\n👇 Bu adaya oy vermek için aşağıdaki butona tıklayın!"
+        markup = InlineKeyboardMarkup()
+        btn = InlineKeyboardButton(f"👑 Bu 1. Olsun (0 Oy)", callback_data=f"mpoll_{poll_id}_{orig_msg_id}")
+        markup.add(btn)
+        try:
+            sent = bot.copy_message(TARGET_CHANNEL_ID, TARGET_CHANNEL_ID, orig_msg_id, caption=aday_duyuru, parse_mode="HTML", reply_markup=markup)
+            channel_msg_ids.append({"orijinal_msg_id": orig_msg_id, "yeni_msg_id": sent.message_id})
+        except: pass
+            
+    try:
+        log_msg = bot.send_message(ADMIN_GROUP_ID, "📊 <b>Aylık Şampiyonlar Ligi Oylama Durumu</b>\n\n<i>Henüz oy kullanılmadı.</i>", parse_mode="HTML")
+        log_msg_id = log_msg.message_id
+    except:
+        log_msg_id = None
+        
+    monthly_polls_col.update_one(
+        {"poll_id": poll_id},
+        {"$set": {
+            "poll_id": poll_id,
+            "duyuru_msg_id": duyuru_msg_id,
+            "log_msg_id": log_msg_id,
+            "candidates": channel_msg_ids,
+            "votes": {},
+            "voter_names": {},
+            "active": True,
+            "created_at": simdi
+        }},
+        upsert=True
+    )
+
+def bitir_ayin_birincisi_oylamasi():
+    simdi = datetime.datetime.utcnow()
+    poll = monthly_polls_col.find_one({"active": True})
+    if not poll: return
+    poll_id = poll["poll_id"]
+    
+    votes = poll.get("votes", {})
+    oy_sayilari = {}
+    for uid, aid in votes.items():
+        oy_sayilari[aid] = oy_sayilari.get(aid, 0) + 1
+        
+    kazanan_aday_id = None
+    kazanan_oy = -1
+    for aid, adet in oy_sayilari.items():
+        if adet > kazanan_oy:
+            kazanan_oy = adet
+            kazanan_aday_id = aid
+            
+    if kazanan_aday_id is None:
+        if poll.get("candidates"):
+            kazanan_aday_id = poll["candidates"][0]["orijinal_msg_id"]
+            kazanan_oy = 0
+        else:
+            monthly_polls_col.update_one({"poll_id": poll_id}, {"$set": {"active": False}})
+            return
+            
+    votes_col.update_one({"msg_id": kazanan_aday_id}, {"$set": {"is_monthly_winner": True}})
+    
+    duyuru = f"👑 <b>AYIN ŞAMPİYONU BELLİ OLDU!</b> 👑\n\nToplam <b>{kazanan_oy}</b> oy alarak bu ayın birincisi olan bu muhteşem hatunu ve gavatını tebrik ediyoruz!\n\n👇 <i>Sen de şampiyon olmak istiyorsan @resimonaybot'a fotoğraf at!</i>"
+    try:
+        sent = bot.copy_message(TARGET_CHANNEL_ID, TARGET_CHANNEL_ID, kazanan_aday_id, caption=duyuru, parse_mode="HTML")
+        bot.pin_chat_message(chat_id=TARGET_CHANNEL_ID, message_id=sent.message_id)
+    except: pass
+        
+    monthly_polls_col.update_one({"poll_id": poll_id}, {"$set": {"active": False}})
+    
+    candidates = poll.get("candidates", [])
+    for cand in candidates:
+        orig = cand["orijinal_msg_id"]
+        yeni_msg_id = cand["yeni_msg_id"]
+        oy_sayisi = oy_sayilari.get(orig, 0)
+        markup = InlineKeyboardMarkup()
+        if orig == kazanan_aday_id:
+            buton_yazisi = f"🏆 ŞAMPİYON 🏆 ({oy_sayisi} Oy)"
+        else:
+            buton_yazisi = f"❌ Oylama Bitti ({oy_sayisi} Oy)"
+        btn = InlineKeyboardButton(buton_yazisi, callback_data="none")
+        markup.add(btn)
+        try: bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=yeni_msg_id, reply_markup=markup)
+        except: pass
+
 def otomatik_mesaj_dongusu():
     mesaj_atildi = False
     haftanin_birincisi_secildi = False
+    ayin_birincisi_basladi = False
+    ayin_birincisi_uyari = False
+    ayin_birincisi_bitti = False
     print("⏰ Zamanlayıcı Motoru Çalıştırıldı...")
     while True:
         try:
             simdi_utc = datetime.datetime.utcnow()
             tr_saati = simdi_utc + datetime.timedelta(hours=3)
+            
+            # Aylık Şampiyonlar Ligi Mantığı (Pazartesi Günü)
+            if is_monthly_poll_day(tr_saati):
+                if tr_saati.hour == 0 and tr_saati.minute == 1:
+                    if not ayin_birincisi_basladi:
+                        baslat_ayin_birincisi_oylamasi()
+                        ayin_birincisi_basladi = True
+                
+                if tr_saati.hour == 23 and tr_saati.minute == 58:
+                    if not ayin_birincisi_uyari:
+                        try: bot.send_message(TARGET_CHANNEL_ID, "⏱️ 1 günlük oylama süresi doldu, 1. seçiliyor bekleyin...")
+                        except: pass
+                        ayin_birincisi_uyari = True
+                        
+                if tr_saati.hour == 23 and tr_saati.minute == 59:
+                    if not ayin_birincisi_bitti:
+                        bitir_ayin_birincisi_oylamasi()
+                        ayin_birincisi_bitti = True
+            else:
+                ayin_birincisi_basladi = False
+                ayin_birincisi_uyari = False
+                ayin_birincisi_bitti = False
             
             # Her gün 18:00
             if tr_saati.hour == 18 and tr_saati.minute == 0:
@@ -263,7 +421,18 @@ def delete_db_record(message):
 # Özel mesajdan gelen resimleri/videoları yakala
 @bot.message_handler(content_types=['photo', 'video'], chat_types=['private'])
 def handle_media(message):
-    user_id = message.chat.id
+    user_id = message.from_user.id
+    
+    # --- AYLIK OYLAMA KONTROLÜ ---
+    aktif_poll = monthly_polls_col.find_one({"active": True})
+    if aktif_poll:
+        duyuru_msg_id = aktif_poll.get("duyuru_msg_id", "")
+        kanal_ismi = CHANNEL_USERNAME
+        link = f"https://t.me/{kanal_ismi}/{duyuru_msg_id}"
+        
+        bot.reply_to(message, f"🚫 <b>Şu an aylık şampiyonlar ligi oylaması aktif!</b>\n\nBugün yeni fotoğraf paylaşımı alınmayacaktır. Lütfen gidip aylık şampiyonumuz için oy verin:\n\n👉 {link}", parse_mode="HTML", disable_web_page_preview=True)
+        return
+        
     kullanici_kaydet(user_id) 
     
     # 1. Ban Kontrolü
@@ -347,8 +516,83 @@ def handle_group_forwards(message):
         except:
             pass
 
+@bot.callback_query_handler(func=lambda call: call.data == "none")
+def handle_none_callback(call):
+    bot.answer_callback_query(call.id, "Oylama Bitti! Maalesef oy veremezsiniz.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("mpoll_"))
+def handle_monthly_poll(call):
+    data = call.data
+    parts = data.split("_")
+    poll_id = "_".join(parts[1:-1])
+    aday_id = int(parts[-1])
+    user_id = str(call.from_user.id)
+    
+    poll = monthly_polls_col.find_one({"poll_id": poll_id})
+    if not poll or not poll.get("active"):
+        bot.answer_callback_query(call.id, "Bu oylama artık aktif değil!")
+        return
+        
+    votes = poll.get("votes", {})
+    eski_oy = votes.get(user_id)
+    if eski_oy == aday_id:
+        bot.answer_callback_query(call.id, "Zaten bu adaya oy verdiniz!", show_alert=True)
+        return
+        
+    voter_names = poll.get("voter_names", {})
+    voter_names[user_id] = call.from_user.first_name
+    
+    votes[user_id] = aday_id
+    monthly_polls_col.update_one({"poll_id": poll_id}, {"$set": {"votes": votes, "voter_names": voter_names}})
+    
+    bot.answer_callback_query(call.id, "Oyunuz başarıyla kaydedildi/değiştirildi!")
+    
+    oy_sayilari = {}
+    aday_oy_verenler = {}
+    for uid, aid in votes.items():
+        oy_sayilari[aid] = oy_sayilari.get(aid, 0) + 1
+        aday_oy_verenler.setdefault(aid, []).append(uid)
+        
+    # Admin grubundaki Log mesajını güncelle
+    log_msg_id = poll.get("log_msg_id")
+    if log_msg_id:
+        log_text = "📊 <b>Aylık Şampiyonlar Ligi Oylama Durumu</b>\n\n"
+        candidates = poll.get("candidates", [])
+        kanal_ismi = CHANNEL_USERNAME
+        
+        for i, cand in enumerate(candidates):
+            orig_id = cand["orijinal_msg_id"]
+            yeni_msg_id = cand["yeni_msg_id"]
+            verenler = aday_oy_verenler.get(orig_id, [])
+            aday_link = f"https://t.me/{kanal_ismi}/{yeni_msg_id}"
+            log_text += f"🏆 <a href='{aday_link}'><b>Aday {i+1}</b></a> ({len(verenler)} Oy):\n"
+            
+            for uid in verenler:
+                isim = voter_names.get(uid, "Bilinmeyen").replace('<', '').replace('>', '')
+                kullanici_link = f'<a href="tg://user?id={uid}">{isim}</a>'
+                log_text += f" 👤 {kullanici_link}\n"
+            log_text += "\n"
+        
+        try: bot.edit_message_text(chat_id=ADMIN_GROUP_ID, message_id=log_msg_id, text=log_text, parse_mode="HTML")
+        except: pass
+            
+    etkilenen_adaylar = set([aday_id])
+    if eski_oy: etkilenen_adaylar.add(eski_oy)
+    
+    candidates = poll.get("candidates", [])
+    for cand in candidates:
+        orig = cand["orijinal_msg_id"]
+        if orig in etkilenen_adaylar:
+            yeni_msg_id = cand["yeni_msg_id"]
+            oy_sayisi = oy_sayilari.get(orig, 0)
+            markup = InlineKeyboardMarkup()
+            btn = InlineKeyboardButton(f"👑 Bu 1. Olsun ({oy_sayisi} Oy)", callback_data=f"mpoll_{poll_id}_{orig}")
+            markup.add(btn)
+            try: bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=yeni_msg_id, reply_markup=markup)
+            except: pass
+
 # Buton tıklamalarını işleme
-@bot.callback_query_handler(func=lambda call: True)
+@bot.callback_query_handler(func=lambda call: not call.data.startswith("mpoll_") and call.data != "none")
 def handle_callback(call):
     data = call.data
     
