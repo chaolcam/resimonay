@@ -15,6 +15,9 @@ ADMIN_GROUP_ID = -1003791676374
 TARGET_CHANNEL_ID = -1003977263609 
 CHANNEL_USERNAME = "yorumlapuanla" 
 
+DAILY_RANKING_GROUP_ID = -1004366591422
+DAILY_RANKING_TOPIC_ID = 2657
+
 PATRON_ID = 7075582251
 
 bot = telebot.TeleBot(TOKEN)
@@ -254,12 +257,57 @@ def bitir_ayin_birincisi_oylamasi():
         try: bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=yeni_msg_id, reply_markup=markup)
         except: pass
 
+def gonder_gunluk_siralama():
+    simdi_utc = datetime.datetime.utcnow()
+    tr_saati = simdi_utc + datetime.timedelta(hours=3)
+    bugun_baslangic_tr = tr_saati.replace(hour=0, minute=0, second=0, microsecond=0)
+    bugun_baslangic_utc = bugun_baslangic_tr - datetime.timedelta(hours=3)
+    
+    all_votes = votes_col.find({"created_at": {"$gte": bugun_baslangic_utc}})
+    
+    ranking_data = []
+    for doc in all_votes:
+        msg_id = doc.get("msg_id")
+        voters = doc.get("voters", {})
+        if not voters: continue
+        total_votes = len(voters)
+        avg_score = sum(voters.values()) / total_votes
+        
+        if total_votes >= 1: 
+            bayesian_score = (total_votes * avg_score + 20 * 6.0) / (total_votes + 20)
+            ranking_data.append({"msg_id": msg_id, "avg_score": avg_score, "total_votes": total_votes, "bayesian_score": bayesian_score})
+            
+    if not ranking_data:
+        text = "📅 <b>Günün En Yüksek Puanlı Gönderileri (Top 10)</b> 🏆\n\nBugün hiç gönderi onaylanmadı veya oy almadı."
+        try:
+            bot.send_message(chat_id=DAILY_RANKING_GROUP_ID, message_thread_id=DAILY_RANKING_TOPIC_ID, text=text, parse_mode="HTML")
+        except Exception as e:
+            print("Günlük sıralama (boş) atılamadı:", e)
+        return
+        
+    ranking_data.sort(key=lambda x: (x["bayesian_score"], x["total_votes"]), reverse=True)
+    top_10 = ranking_data[:10]
+    
+    text = "📅 <b>Günün En Yüksek Puanlı Gönderileri (Top 10)</b> 🏆\n\n"
+    for i, data in enumerate(top_10, 1):
+        msg_id = data["msg_id"]
+        avg = data["bayesian_score"]
+        votes_count = data["total_votes"]
+        link = f"https://t.me/{CHANNEL_USERNAME}/{msg_id}"
+        text += f"<b>{i}.</b> <a href='{link}'>Gönderiye Git</a> - ⭐ {avg:.2f} <i>({votes_count} oy)</i>\n"
+        
+    try:
+        bot.send_message(chat_id=DAILY_RANKING_GROUP_ID, message_thread_id=DAILY_RANKING_TOPIC_ID, text=text, parse_mode="HTML", disable_web_page_preview=True)
+    except Exception as e:
+        print("Günlük sıralama atılamadı:", e)
+
 def otomatik_mesaj_dongusu():
     mesaj_atildi = False
     haftanin_birincisi_secildi = False
     ayin_birincisi_basladi = False
     ayin_birincisi_uyari = False
     ayin_birincisi_bitti = False
+    gunluk_siralama_atildi = False
     print("⏰ Zamanlayıcı Motoru Çalıştırıldı...")
     while True:
         try:
@@ -300,6 +348,14 @@ def otomatik_mesaj_dongusu():
             else:
                 mesaj_atildi = False 
                 
+            # Her gün 23:58 Günlük Sıralama
+            if tr_saati.hour == 23 and tr_saati.minute == 58:
+                if not gunluk_siralama_atildi:
+                    gonder_gunluk_siralama()
+                    gunluk_siralama_atildi = True
+            else:
+                gunluk_siralama_atildi = False
+                
             # Her Pazar 23:59
             if tr_saati.weekday() == 6 and tr_saati.hour == 23 and tr_saati.minute == 59:
                 if not haftanin_birincisi_secildi:
@@ -329,6 +385,14 @@ def generate_rating_keyboard(message_id):
         row_buttons.append(btn)
     markup.add(*row_buttons)
     return markup
+
+# --- GRUP KOMUT ENGELLEYİCİ ---
+@bot.message_handler(func=lambda message: message.chat.id == DAILY_RANKING_GROUP_ID and message.text and message.text.startswith('/'))
+def delete_commands_in_ranking_group(message):
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
 
 # 1. /start Komutu
 @bot.message_handler(commands=['start'], chat_types=['private'])
