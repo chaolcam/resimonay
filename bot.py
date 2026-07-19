@@ -387,7 +387,7 @@ def generate_rating_keyboard(message_id):
     return markup
 
 # --- GRUP KOMUT ENGELLEYİCİ ---
-@bot.message_handler(func=lambda message: message.chat.id == DAILY_RANKING_GROUP_ID and message.text and message.text.startswith('/'))
+@bot.message_handler(func=lambda message: message.chat.id == DAILY_RANKING_GROUP_ID and message.text and message.text.startswith('/') and message.from_user.id != PATRON_ID)
 def delete_commands_in_ranking_group(message):
     try:
         bot.delete_message(message.chat.id, message.message_id)
