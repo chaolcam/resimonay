@@ -514,6 +514,18 @@ def unban_user(message):
     except Exception:
         pass
 
+# /testsiralama Komutu
+@bot.message_handler(commands=['testsiralama'])
+def test_gunluk_siralama(message):
+    if message.chat.id != ADMIN_GROUP_ID and message.from_user.id != PATRON_ID:
+        return
+    bot.reply_to(message, "⏳ Günlük sıralama manuel olarak tetikleniyor...")
+    try:
+        gonder_gunluk_siralama()
+        bot.reply_to(message, "✅ Günlük sıralama gönderildi! Eğer onaylanmış gönderi yoksa grubun içine 'hiç gönderi yok' şeklinde bilgi mesajı gitmiş olmalı.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Hata oluştu: {e}")
+
 # Özel mesajdan gelen resimleri/videoları yakala
 @bot.message_handler(content_types=['photo', 'video'], chat_types=['private'])
 def handle_media(message):
