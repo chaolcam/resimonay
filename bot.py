@@ -15,7 +15,7 @@ ADMIN_GROUP_ID = -1003791676374
 TARGET_CHANNEL_ID = -1003977263609 
 CHANNEL_USERNAME = "yorumlapuanla" 
 
-DAILY_RANKING_GROUP_ID = -1004366591422
+DAILY_RANKING_GROUP_ID = -1004366591432
 DAILY_RANKING_TOPIC_ID = 2657
 
 PATRON_ID = 7075582251
@@ -293,6 +293,7 @@ def gonder_gunluk_siralama():
             bot.send_message(chat_id=DAILY_RANKING_GROUP_ID, message_thread_id=DAILY_RANKING_TOPIC_ID, text=text, parse_mode="HTML")
         except Exception as e:
             print("Günlük sıralama (boş) atılamadı:", e)
+            raise e
         return
         
     ranking_data.sort(key=lambda x: (x["bayesian_score"], x["total_votes"]), reverse=True)
@@ -310,6 +311,7 @@ def gonder_gunluk_siralama():
         bot.send_message(chat_id=DAILY_RANKING_GROUP_ID, message_thread_id=DAILY_RANKING_TOPIC_ID, text=text, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
         print("Günlük sıralama atılamadı:", e)
+        raise e
 
 def otomatik_mesaj_dongusu():
     mesaj_atildi = False
