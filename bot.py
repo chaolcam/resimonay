@@ -260,10 +260,20 @@ def bitir_ayin_birincisi_oylamasi():
 def gonder_gunluk_siralama():
     simdi_utc = datetime.datetime.utcnow()
     tr_saati = simdi_utc + datetime.timedelta(hours=3)
-    bugun_baslangic_tr = tr_saati.replace(hour=0, minute=0, second=0, microsecond=0)
-    bugun_baslangic_utc = bugun_baslangic_tr - datetime.timedelta(hours=3)
     
-    all_votes = votes_col.find({"created_at": {"$gte": bugun_baslangic_utc}})
+    # Eğer gece 00:00 veya 00:01 sularında çalışıyorsa, "dünün" sıralamasını yapmalıyız.
+    if tr_saati.hour == 0:
+        hedef_gun_tr = tr_saati - datetime.timedelta(days=1)
+    else:
+        hedef_gun_tr = tr_saati
+        
+    baslangic_tr = hedef_gun_tr.replace(hour=0, minute=0, second=0, microsecond=0)
+    bitis_tr = hedef_gun_tr.replace(hour=23, minute=59, second=59, microsecond=999999)
+    
+    baslangic_utc = baslangic_tr - datetime.timedelta(hours=3)
+    bitis_utc = bitis_tr - datetime.timedelta(hours=3)
+    
+    all_votes = votes_col.find({"created_at": {"$gte": baslangic_utc, "$lte": bitis_utc}})
     
     ranking_data = []
     for doc in all_votes:
@@ -348,8 +358,8 @@ def otomatik_mesaj_dongusu():
             else:
                 mesaj_atildi = False 
                 
-            # Her gün 23:58 Günlük Sıralama
-            if tr_saati.hour == 23 and tr_saati.minute == 58:
+            # Her gün 00:00 Günlük Sıralama (Dünün En İyileri)
+            if tr_saati.hour == 0 and tr_saati.minute == 0:
                 if not gunluk_siralama_atildi:
                     gonder_gunluk_siralama()
                     gunluk_siralama_atildi = True
