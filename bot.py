@@ -508,6 +508,18 @@ def reset_database(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Sıfırlama sırasında hata oluştu: {e}")
 
+# /resetspam Komutu (Tüm spam kayıtlarını sıfırlar)
+@bot.message_handler(commands=['resetspam'])
+def reset_spam_database(message):
+    if message.from_user.id != PATRON_ID:
+        return
+        
+    try:
+        silinen_spamlar = spam_col.delete_many({})
+        bot.reply_to(message, f"✅ <b>Spam Kayıtları Sıfırlandı!</b>\n\n🗑 Silinen Spam Kaydı: {silinen_spamlar.deleted_count}", parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Spam sıfırlama sırasında hata oluştu: {e}")
+
 
 # Özel mesajdan gelen resimleri/videoları yakala
 @bot.message_handler(content_types=['photo', 'video'], chat_types=['private'])
