@@ -12,11 +12,9 @@ TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URI = os.environ.get("MONGO_URI") 
 
 ADMIN_GROUP_ID = -1003791676374
-TARGET_CHANNEL_ID = -1003977263609 
-CHANNEL_USERNAME = "yorumlapuanla" 
-
-DAILY_RANKING_GROUP_ID = -1004366591432
-DAILY_RANKING_TOPIC_ID = 2657
+TARGET_CHANNEL_ID = -1003983042944 # Yeni kanalınızın ID'sini -100 ekleyerek yazdım.
+CHANNEL_USERNAME = "resimpuanla" 
+BACKUP_CHANNEL_ID = -1004437720557 # Yedek kanal açarsanız ID'sini buraya yazın (Örn: -100987654321)
 
 PATRON_ID = 7075582251
 
@@ -108,7 +106,7 @@ def sec_haftanin_birincisi():
         
         if total_votes >= 1: 
             bayesian_score = (total_votes * avg_score + 20 * 6.0) / (total_votes + 20)
-            ranking_data.append({"msg_id": doc.get("msg_id"), "avg_score": avg_score, "total_votes": total_votes, "_id": doc["_id"], "bayesian_score": bayesian_score})
+            ranking_data.append({"msg_id": doc.get("msg_id"), "photo_msg_id": doc.get("photo_msg_id", doc.get("msg_id")), "avg_score": avg_score, "total_votes": total_votes, "_id": doc["_id"], "bayesian_score": bayesian_score})
             
     if not ranking_data: return
         
@@ -116,11 +114,12 @@ def sec_haftanin_birincisi():
     winner = ranking_data[0]
     votes_col.update_one({"_id": winner["_id"]}, {"$set": {"is_weekly_winner": True}})
     
-    link = f"https://t.me/{CHANNEL_USERNAME}/{winner['msg_id']}"
+    photo_msg_id = winner['photo_msg_id']
+    link = f"https://t.me/{CHANNEL_USERNAME}/{photo_msg_id}"
     metin = f"🏆 <b>HAFTANIN BİRİNCİSİ</b> 🏆\n\n⭐ Güven Puanı: {winner['bayesian_score']:.2f} <i>({winner['total_votes']} oy)</i>\n\nBu muhteşem gönderiyi tekrar görmek için tıklayın: {link}\n\n👇 <i>Sen de fotoğrafını oylatmak istiyorsan @resimonaybot'a mesaj gönderebilirsin!</i>"
     
     try:
-        sent_msg = bot.copy_message(TARGET_CHANNEL_ID, TARGET_CHANNEL_ID, winner['msg_id'], caption=metin, parse_mode="HTML")
+        sent_msg = bot.copy_message(TARGET_CHANNEL_ID, TARGET_CHANNEL_ID, photo_msg_id, caption=metin, parse_mode="HTML")
         bot.pin_chat_message(chat_id=TARGET_CHANNEL_ID, message_id=sent_msg.message_id)
     except Exception as e:
         print("Mesaj atma veya sabitleme hatası:", e)
@@ -176,12 +175,13 @@ def baslat_ayin_birincisi_oylamasi():
     channel_msg_ids = []
     for i, doc in enumerate(sampiyonlar):
         orig_msg_id = doc["msg_id"]
-        aday_duyuru = f"👑 <a href='https://t.me/{CHANNEL_USERNAME}/{orig_msg_id}'><b>Aday {i+1}</b></a>\n👇 Bu adaya oy vermek için aşağıdaki butona tıklayın!"
+        photo_msg_id = doc.get("photo_msg_id", orig_msg_id)
+        aday_duyuru = f"👑 <a href='https://t.me/{CHANNEL_USERNAME}/{photo_msg_id}'><b>Aday {i+1}</b></a>\n👇 Bu adaya oy vermek için aşağıdaki butona tıklayın!"
         markup = InlineKeyboardMarkup()
         btn = InlineKeyboardButton(f"👑 Bu 1. Olsun (0 Oy)", callback_data=f"mpoll_{poll_id}_{orig_msg_id}")
         markup.add(btn)
         try:
-            sent = bot.copy_message(TARGET_CHANNEL_ID, TARGET_CHANNEL_ID, orig_msg_id, caption=aday_duyuru, parse_mode="HTML", reply_markup=markup)
+            sent = bot.copy_message(TARGET_CHANNEL_ID, TARGET_CHANNEL_ID, photo_msg_id, caption=aday_duyuru, parse_mode="HTML", reply_markup=markup)
             channel_msg_ids.append({"orijinal_msg_id": orig_msg_id, "yeni_msg_id": sent.message_id})
         except: pass
             
@@ -232,11 +232,14 @@ def bitir_ayin_birincisi_oylamasi():
             monthly_polls_col.update_one({"poll_id": poll_id}, {"$set": {"active": False}})
             return
             
+    kazanan_doc = votes_col.find_one({"msg_id": kazanan_aday_id})
+    photo_msg_id = kazanan_doc.get("photo_msg_id", kazanan_aday_id) if kazanan_doc else kazanan_aday_id
+            
     votes_col.update_one({"msg_id": kazanan_aday_id}, {"$set": {"is_monthly_winner": True}})
     
     duyuru = f"👑 <b>AYIN ŞAMPİYONU BELLİ OLDU!</b> 👑\n\nToplam <b>{kazanan_oy}</b> oy alarak bu ayın birincisi olan bu muhteşem hatunu ve gavatını tebrik ediyoruz!\n\n👇 <i>Sen de şampiyon olmak istiyorsan @resimonaybot'a fotoğraf at!</i>"
     try:
-        sent = bot.copy_message(TARGET_CHANNEL_ID, TARGET_CHANNEL_ID, kazanan_aday_id, caption=duyuru, parse_mode="HTML")
+        sent = bot.copy_message(TARGET_CHANNEL_ID, TARGET_CHANNEL_ID, photo_msg_id, caption=duyuru, parse_mode="HTML")
         bot.pin_chat_message(chat_id=TARGET_CHANNEL_ID, message_id=sent.message_id)
     except: pass
         
@@ -257,61 +260,6 @@ def bitir_ayin_birincisi_oylamasi():
         try: bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=yeni_msg_id, reply_markup=markup)
         except: pass
 
-def gonder_gunluk_siralama():
-    simdi_utc = datetime.datetime.utcnow()
-    tr_saati = simdi_utc + datetime.timedelta(hours=3)
-    
-    # Eğer gece 00:00 veya 00:01 sularında çalışıyorsa, "dünün" sıralamasını yapmalıyız.
-    if tr_saati.hour == 0:
-        hedef_gun_tr = tr_saati - datetime.timedelta(days=1)
-    else:
-        hedef_gun_tr = tr_saati
-        
-    baslangic_tr = hedef_gun_tr.replace(hour=0, minute=0, second=0, microsecond=0)
-    bitis_tr = hedef_gun_tr.replace(hour=23, minute=59, second=59, microsecond=999999)
-    
-    baslangic_utc = baslangic_tr - datetime.timedelta(hours=3)
-    bitis_utc = bitis_tr - datetime.timedelta(hours=3)
-    
-    all_votes = votes_col.find({"created_at": {"$gte": baslangic_utc, "$lte": bitis_utc}})
-    
-    ranking_data = []
-    for doc in all_votes:
-        msg_id = doc.get("msg_id")
-        voters = doc.get("voters", {})
-        if not voters: continue
-        total_votes = len(voters)
-        avg_score = sum(voters.values()) / total_votes
-        
-        if total_votes >= 1: 
-            bayesian_score = (total_votes * avg_score + 20 * 6.0) / (total_votes + 20)
-            ranking_data.append({"msg_id": msg_id, "avg_score": avg_score, "total_votes": total_votes, "bayesian_score": bayesian_score})
-            
-    if not ranking_data:
-        text = "📅 <b>Günün En Yüksek Puanlı Gönderileri (Top 10)</b> 🏆\n\nBugün hiç gönderi onaylanmadı veya oy almadı."
-        try:
-            bot.send_message(chat_id=DAILY_RANKING_GROUP_ID, message_thread_id=DAILY_RANKING_TOPIC_ID, text=text, parse_mode="HTML")
-        except Exception as e:
-            print("Günlük sıralama (boş) atılamadı:", e)
-            raise e
-        return
-        
-    ranking_data.sort(key=lambda x: (x["bayesian_score"], x["total_votes"]), reverse=True)
-    top_10 = ranking_data[:10]
-    
-    text = "📅 <b>Günün En Yüksek Puanlı Gönderileri (Top 10)</b> 🏆\n\n"
-    for i, data in enumerate(top_10, 1):
-        msg_id = data["msg_id"]
-        avg = data["bayesian_score"]
-        votes_count = data["total_votes"]
-        link = f"https://t.me/{CHANNEL_USERNAME}/{msg_id}"
-        text += f"<b>{i}.</b> <a href='{link}'>Gönderiye Git</a> - ⭐ {avg:.2f} <i>({votes_count} oy)</i>\n"
-        
-    try:
-        bot.send_message(chat_id=DAILY_RANKING_GROUP_ID, message_thread_id=DAILY_RANKING_TOPIC_ID, text=text, parse_mode="HTML", disable_web_page_preview=True)
-    except Exception as e:
-        print("Günlük sıralama atılamadı:", e)
-        raise e
 
 def otomatik_mesaj_dongusu():
     mesaj_atildi = False
@@ -359,15 +307,7 @@ def otomatik_mesaj_dongusu():
                     mesaj_atildi = True
             else:
                 mesaj_atildi = False 
-                
-            # Her gün 00:00 Günlük Sıralama (Dünün En İyileri)
-            if tr_saati.hour == 0 and tr_saati.minute == 0:
-                if not gunluk_siralama_atildi:
-                    gonder_gunluk_siralama()
-                    gunluk_siralama_atildi = True
-            else:
-                gunluk_siralama_atildi = False
-                
+
             # Her Pazar 23:59
             if tr_saati.weekday() == 6 and tr_saati.hour == 23 and tr_saati.minute == 59:
                 if not haftanin_birincisi_secildi:
@@ -398,13 +338,6 @@ def generate_rating_keyboard(message_id):
     markup.add(*row_buttons)
     return markup
 
-# --- GRUP KOMUT ENGELLEYİCİ ---
-@bot.message_handler(func=lambda message: message.chat.id == DAILY_RANKING_GROUP_ID and message.text and message.text.startswith('/') and message.from_user.id != PATRON_ID)
-def delete_commands_in_ranking_group(message):
-    try:
-        bot.delete_message(message.chat.id, message.message_id)
-    except:
-        pass
 
 # 1. /start Komutu
 @bot.message_handler(commands=['start'], chat_types=['private'])
@@ -456,7 +389,7 @@ def send_ranking(message):
             avg_score = sum(voters.values()) / total_votes
             if total_votes >= 1:
                 bayesian_score = (total_votes * avg_score + 20 * 6.0) / (total_votes + 20)
-                ranking_data.append({"msg_id": msg_id, "avg_score": avg_score, "total_votes": total_votes, "bayesian_score": bayesian_score})
+                ranking_data.append({"msg_id": msg_id, "photo_msg_id": doc.get("photo_msg_id", msg_id), "avg_score": avg_score, "total_votes": total_votes, "bayesian_score": bayesian_score})
         
         if not ranking_data:
             bot.reply_to(message, "Henüz hiç oy alan gönderi bulunmuyor.")
@@ -467,10 +400,10 @@ def send_ranking(message):
         
         text = "🏆 <b>En Yüksek Puanlı Gönderiler (Top 10)</b> 🏆\n\n"
         for i, data in enumerate(top_10, 1):
-            msg_id = data["msg_id"]
+            photo_msg_id = data["photo_msg_id"]
             avg = data["bayesian_score"]
             votes_count = data["total_votes"]
-            link = f"https://t.me/{CHANNEL_USERNAME}/{msg_id}"
+            link = f"https://t.me/{CHANNEL_USERNAME}/{photo_msg_id}"
             text += f"<b>{i}.</b> <a href='{link}'>Gönderiye Git</a> - ⭐ {avg:.2f} <i>({votes_count} oy)</i>\n"
             
         bot.reply_to(message, text, parse_mode="HTML", disable_web_page_preview=True)
@@ -486,7 +419,7 @@ def delete_db_record(message):
         return
     try:
         msg_id = int(parts[1])
-        sonuc = votes_col.delete_one({"msg_id": msg_id})
+        sonuc = votes_col.delete_one({"$or": [{"msg_id": msg_id}, {"photo_msg_id": msg_id}]})
         if sonuc.deleted_count > 0:
             bot.reply_to(message, f"✅ <b>Başarılı!</b> {msg_id} ID'li gönderi veritabanından silindi.", parse_mode="HTML")
         else:
@@ -516,17 +449,19 @@ def unban_user(message):
     except Exception:
         pass
 
-# /testsiralama Komutu
-@bot.message_handler(commands=['testsiralama'])
-def test_gunluk_siralama(message):
-    if message.chat.id != ADMIN_GROUP_ID and message.from_user.id != PATRON_ID:
+# /resetdb Komutu (Tüm gönderileri sıfırlar)
+@bot.message_handler(commands=['resetdb'])
+def reset_database(message):
+    if message.from_user.id != PATRON_ID:
         return
-    bot.reply_to(message, "⏳ Günlük sıralama manuel olarak tetikleniyor...")
+        
     try:
-        gonder_gunluk_siralama()
-        bot.reply_to(message, "✅ Günlük sıralama gönderildi! Eğer onaylanmış gönderi yoksa grubun içine 'hiç gönderi yok' şeklinde bilgi mesajı gitmiş olmalı.")
+        silinen_oylar = votes_col.delete_many({})
+        silinen_ayliklar = monthly_polls_col.delete_many({})
+        bot.reply_to(message, f"✅ <b>Veritabanı Sıfırlandı!</b>\n\n🗑 Silinen Gönderi Kaydı: {silinen_oylar.deleted_count}\n🗑 Silinen Aylık Oylama Kaydı: {silinen_ayliklar.deleted_count}", parse_mode="HTML")
     except Exception as e:
-        bot.reply_to(message, f"❌ Hata oluştu: {e}")
+        bot.reply_to(message, f"❌ Sıfırlama sırasında hata oluştu: {e}")
+
 
 # Özel mesajdan gelen resimleri/videoları yakala
 @bot.message_handler(content_types=['photo', 'video'], chat_types=['private'])
@@ -587,25 +522,14 @@ def handle_media(message):
             except: pass
         return
 
-    user_link = f"@{message.from_user.username}" if message.from_user.username else f'<a href="tg://user?id={user_id}">{user_name}</a>'
-    
-    # 3. Butonları Ekleme (Onay, Red, Ban)
     markup = InlineKeyboardMarkup()
-    btn_approve = InlineKeyboardButton("Onayla ✅", callback_data=f"approve_{user_id}_{orig_msg_id}")
-    btn_reject = InlineKeyboardButton("Reddet ❌", callback_data=f"reject_{user_id}_{orig_msg_id}")
-    btn_ban = InlineKeyboardButton("Kullanıcıyı Banla 🚫", callback_data=f"banuser_{user_id}_{orig_msg_id}")
-    markup.add(btn_approve, btn_reject)
-    markup.add(btn_ban)
-
-    admin_text = f"<b>Gönderen:</b> {user_link}\n\n{caption}"
+    btn_anon = InlineKeyboardButton("🥷 Gizli (Anonim) Paylaş", callback_data="submit_anon")
+    btn_named = InlineKeyboardButton("👤 İsmimle Paylaş", callback_data="submit_named")
+    markup.add(btn_anon, btn_named)
+    
     try:
-        if message.content_type == 'photo':
-            bot.send_photo(ADMIN_GROUP_ID, message.photo[-1].file_id, caption=admin_text, reply_markup=markup, parse_mode='HTML')
-        elif message.content_type == 'video':
-            bot.send_video(ADMIN_GROUP_ID, message.video.file_id, caption=admin_text, reply_markup=markup, parse_mode='HTML')
-        bot.reply_to(message, "Resminiz adminlerimize iletilmiştir, lütfen bekleyiniz.")
-    except Exception as e:
-        print(f"Hata: {e}")
+        bot.reply_to(message, "📸 <b>Resim iletildi!</b>\n\nBu fotoğraf kanalda paylaşılırken isminiz görünsün mü, yoksa anonim (gizli) olarak mı paylaşılsın?", reply_markup=markup, parse_mode="HTML")
+    except: pass
 
 # TARTIŞMA GRUBU YAKALAYICISI
 @bot.message_handler(content_types=['photo', 'video', 'text'], func=lambda m: getattr(m, 'is_automatic_forward', False))
@@ -701,6 +625,41 @@ def handle_monthly_poll(call):
             try: bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=yeni_msg_id, reply_markup=markup)
             except: pass
 
+@bot.callback_query_handler(func=lambda call: call.data in ["submit_anon", "submit_named"])
+def handle_submission_choice(call):
+    is_anon = (call.data == "submit_anon")
+    user_id = call.from_user.id
+    
+    orig_msg = call.message.reply_to_message
+    if not orig_msg:
+        bot.answer_callback_query(call.id, "Orijinal mesaj bulunamadı.")
+        return
+        
+    caption = orig_msg.caption if orig_msg.caption else ""
+    user_name = str(call.from_user.first_name).replace("<", "").replace(">", "")
+    orig_msg_id = orig_msg.message_id
+    
+    user_link = f"@{call.from_user.username}" if call.from_user.username else f'<a href="tg://user?id={user_id}">{user_name}</a>'
+    kanalda_gorunecek = "🥷 Anonim" if is_anon else user_link
+    
+    markup = InlineKeyboardMarkup()
+    btn_approve = InlineKeyboardButton("Onayla ✅", callback_data=f"approve_{user_id}_{orig_msg_id}")
+    btn_reject = InlineKeyboardButton("Reddet ❌", callback_data=f"reject_{user_id}_{orig_msg_id}")
+    btn_ban = InlineKeyboardButton("Kullanıcıyı Banla 🚫", callback_data=f"banuser_{user_id}_{orig_msg_id}")
+    markup.add(btn_approve, btn_reject)
+    markup.add(btn_ban)
+    
+    admin_text = f"<b>Gönderen (Admin İçin):</b> {user_link}\n<b>Kanalda Görünecek:</b> {kanalda_gorunecek}\n---\n{caption}"
+    try:
+        if orig_msg.content_type == 'photo':
+            bot.send_photo(ADMIN_GROUP_ID, orig_msg.photo[-1].file_id, caption=admin_text, reply_markup=markup, parse_mode='HTML')
+        elif orig_msg.content_type == 'video':
+            bot.send_video(ADMIN_GROUP_ID, orig_msg.video.file_id, caption=admin_text, reply_markup=markup, parse_mode='HTML')
+            
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="✅ Tercihiniz kaydedildi ve fotoğrafınız admin onayına sunuldu!")
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Hata: {e}")
+
 # Buton tıklamalarını işleme
 @bot.callback_query_handler(func=lambda call: not call.data.startswith("mpoll_") and call.data != "none")
 def handle_callback(call):
@@ -742,12 +701,20 @@ def handle_callback(call):
             bayesian_score = (total_votes * avg_score + 20 * 6.0) / (total_votes + 20)
             
             try:
-                full_caption = call.message.caption if call.message.caption else ""
-                base_caption = full_caption.split("📊 Oylama Sonucu:")[0].strip() if "📊 Oylama Sonucu:" in full_caption else full_caption.strip()
-                new_caption = f"{base_caption}\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)" if base_caption else f"📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
-                new_markup = generate_rating_keyboard(msg_id)
-                bot.edit_message_caption(chat_id=TARGET_CHANNEL_ID, message_id=msg_id, caption=new_caption, reply_markup=new_markup)
-            except: pass 
+                if call.message.content_type in ['photo', 'video']:
+                    full_caption = call.message.caption if call.message.caption else ""
+                    base_caption = full_caption.split("📊 Oylama Sonucu:")[0].strip() if "📊 Oylama Sonucu:" in full_caption else full_caption.strip()
+                    new_caption = f"{base_caption}\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)" if base_caption else f"📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
+                    new_markup = generate_rating_keyboard(msg_id)
+                    bot.edit_message_caption(chat_id=TARGET_CHANNEL_ID, message_id=msg_id, caption=new_caption, reply_markup=new_markup)
+                else:
+                    full_text = call.message.text if call.message.text else ""
+                    base_text = full_text.split("📊 Oylama Sonucu:")[0].strip() if "📊 Oylama Sonucu:" in full_text else full_text.strip()
+                    new_text = f"{base_text}\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)" if base_text else f"📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
+                    new_markup = generate_rating_keyboard(msg_id)
+                    bot.edit_message_text(chat_id=TARGET_CHANNEL_ID, message_id=msg_id, text=new_text, reply_markup=new_markup)
+            except Exception as e:
+                print("Oylama metni guncellenemedi:", e)
                 
             new_markup = generate_rating_keyboard(msg_id)
             if doc and "group_reply_msg_id" in doc and "group_chat_id" in doc:
@@ -783,8 +750,22 @@ def handle_callback(call):
     kullanici_kaydet(user_id)
     
     plain_caption = admin_msg.caption if admin_msg.caption else ""
-    original_caption = plain_caption.split("\n\n", 1)[1].strip() if "\n\n" in plain_caption else ""
     html_full_caption = admin_msg.html_caption if admin_msg.html_caption else plain_caption
+    
+    kanalda_gorunecek = "👤 İsimsiz"
+    original_caption = ""
+    
+    if "\n---\n" in html_full_caption:
+        parts = html_full_caption.split("\n---\n", 1)
+        meta = parts[0]
+        original_caption = parts[1].strip()
+        for line in meta.split('\n'):
+            if "Kanalda Görünecek:" in line:
+                kanalda_gorunecek = line.replace("<b>Kanalda Görünecek:</b>", "").strip()
+    else:
+        original_caption = html_full_caption.split("\n\n", 1)[1].strip() if "\n\n" in html_full_caption else ""
+
+    channel_caption = f"👇 Bu resmi oylamayı ve yorum yapmayı unutmayın! 👇\n\n👤 Gönderen: {kanalda_gorunecek}"
 
     # Etiketi Hazırla
     admin_isim = str(call.from_user.first_name).replace('<', '').replace('>', '')
@@ -792,20 +773,36 @@ def handle_callback(call):
 
     if action == "approve":
         try:
-            sent_msg = None
-            initial_caption = f"{original_caption}\n\n📊 Oylama Sonucu:\n⭐ Henüz oy verilmedi." if original_caption else "📊 Oylama Sonucu:\n⭐ Henüz oy verilmedi."
+            sent_photo_msg = None
             if admin_msg.content_type == 'photo':
-                sent_msg = bot.send_photo(TARGET_CHANNEL_ID, admin_msg.photo[-1].file_id, caption=initial_caption)
+                sent_photo_msg = bot.send_photo(TARGET_CHANNEL_ID, admin_msg.photo[-1].file_id, caption=channel_caption, parse_mode='HTML')
+                if BACKUP_CHANNEL_ID:
+                    try: bot.send_photo(BACKUP_CHANNEL_ID, admin_msg.photo[-1].file_id, caption=channel_caption, parse_mode='HTML')
+                    except: pass
             elif admin_msg.content_type == 'video':
-                sent_msg = bot.send_video(TARGET_CHANNEL_ID, admin_msg.video.file_id, caption=initial_caption)
+                sent_photo_msg = bot.send_video(TARGET_CHANNEL_ID, admin_msg.video.file_id, caption=channel_caption, parse_mode='HTML')
+                if BACKUP_CHANNEL_ID:
+                    try: bot.send_video(BACKUP_CHANNEL_ID, admin_msg.video.file_id, caption=channel_caption, parse_mode='HTML')
+                    except: pass
             
             post_link = ""
-            if sent_msg:
+            if sent_photo_msg:
+                poll_text = "👇 Lütfen bu gönderiyi oylayın 👇\n\n📊 Oylama Sonucu:\n⭐ Henüz oy verilmedi."
+                sent_poll_msg = bot.send_message(TARGET_CHANNEL_ID, poll_text, reply_to_message_id=sent_photo_msg.message_id)
+                
                 log_msg = bot.send_message(chat_id=admin_msg.chat.id, text="📊 <b>Güncel Oylama Durumu</b>\n<i>Henüz oy verilmedi...</i>", reply_to_message_id=admin_msg.message_id, parse_mode="HTML")
-                votes_col.insert_one({"msg_id": sent_msg.message_id, "voters": {}, "voter_names": {}, "log_msg_id": log_msg.message_id, "log_chat_id": admin_msg.chat.id, "created_at": datetime.datetime.utcnow()})
-                initial_markup = generate_rating_keyboard(sent_msg.message_id)
-                bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=sent_msg.message_id, reply_markup=initial_markup)
-                post_link = f"https://t.me/{CHANNEL_USERNAME}/{sent_msg.message_id}"
+                votes_col.insert_one({
+                    "msg_id": sent_poll_msg.message_id, 
+                    "photo_msg_id": sent_photo_msg.message_id,
+                    "voters": {}, 
+                    "voter_names": {}, 
+                    "log_msg_id": log_msg.message_id, 
+                    "log_chat_id": admin_msg.chat.id, 
+                    "created_at": datetime.datetime.utcnow()
+                })
+                initial_markup = generate_rating_keyboard(sent_poll_msg.message_id)
+                bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=sent_poll_msg.message_id, reply_markup=initial_markup)
+                post_link = f"https://t.me/{CHANNEL_USERNAME}/{sent_photo_msg.message_id}"
 
             yeni_baslik = f"✅ {admin_etiket} Tarafından ONAYLANDI\n\n{html_full_caption}"
             if len(yeni_baslik) > 1024:
