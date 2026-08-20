@@ -759,6 +759,9 @@ def handle_callback(call):
                     new_text = f"{base_text}\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)" if base_text else f"📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
                     new_markup = generate_rating_keyboard(msg_id)
                     bot.edit_message_text(chat_id=TARGET_CHANNEL_ID, message_id=msg_id, text=new_text, reply_markup=new_markup)
+                    if doc and doc.get("backup_msg_id") and BACKUP_CHANNEL_ID:
+                        try: bot.edit_message_text(chat_id=BACKUP_CHANNEL_ID, message_id=doc["backup_msg_id"], text=new_text, reply_markup=new_markup)
+                        except: pass
             except Exception as e:
                 print("Oylama metni guncellenemedi:", e)
                 
@@ -820,15 +823,16 @@ def handle_callback(call):
     if action == "approve":
         try:
             sent_photo_msg = None
+            sent_backup_photo_msg = None
             if admin_msg.content_type == 'photo':
                 sent_photo_msg = bot.send_photo(TARGET_CHANNEL_ID, admin_msg.photo[-1].file_id, caption=channel_caption, parse_mode='HTML')
                 if BACKUP_CHANNEL_ID:
-                    try: bot.send_photo(BACKUP_CHANNEL_ID, admin_msg.photo[-1].file_id, caption=channel_caption, parse_mode='HTML')
+                    try: sent_backup_photo_msg = bot.send_photo(BACKUP_CHANNEL_ID, admin_msg.photo[-1].file_id, caption=channel_caption, parse_mode='HTML')
                     except: pass
             elif admin_msg.content_type == 'video':
                 sent_photo_msg = bot.send_video(TARGET_CHANNEL_ID, admin_msg.video.file_id, caption=channel_caption, parse_mode='HTML')
                 if BACKUP_CHANNEL_ID:
-                    try: bot.send_video(BACKUP_CHANNEL_ID, admin_msg.video.file_id, caption=channel_caption, parse_mode='HTML')
+                    try: sent_backup_photo_msg = bot.send_video(BACKUP_CHANNEL_ID, admin_msg.video.file_id, caption=channel_caption, parse_mode='HTML')
                     except: pass
             
             post_link = ""
@@ -836,10 +840,18 @@ def handle_callback(call):
                 poll_text = "👇 Lütfen bu gönderiyi oylayın 👇\n\n📊 Oylama Sonucu:\n⭐ Henüz oy verilmedi."
                 sent_poll_msg = bot.send_message(TARGET_CHANNEL_ID, poll_text, reply_to_message_id=sent_photo_msg.message_id)
                 
+                backup_poll_msg_id = None
+                if BACKUP_CHANNEL_ID and sent_backup_photo_msg:
+                    try: 
+                        sent_backup_poll = bot.send_message(BACKUP_CHANNEL_ID, poll_text, reply_to_message_id=sent_backup_photo_msg.message_id)
+                        backup_poll_msg_id = sent_backup_poll.message_id
+                    except: pass
+                
                 log_msg = bot.send_message(chat_id=admin_msg.chat.id, text="📊 <b>Güncel Oylama Durumu</b>\n<i>Henüz oy verilmedi...</i>", reply_to_message_id=admin_msg.message_id, parse_mode="HTML")
                 votes_col.insert_one({
                     "msg_id": sent_poll_msg.message_id, 
                     "photo_msg_id": sent_photo_msg.message_id,
+                    "backup_msg_id": backup_poll_msg_id,
                     "voters": {}, 
                     "voter_names": {}, 
                     "log_msg_id": log_msg.message_id, 
@@ -848,6 +860,9 @@ def handle_callback(call):
                 })
                 initial_markup = generate_rating_keyboard(sent_poll_msg.message_id)
                 bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=sent_poll_msg.message_id, reply_markup=initial_markup)
+                if backup_poll_msg_id and BACKUP_CHANNEL_ID:
+                    try: bot.edit_message_reply_markup(chat_id=BACKUP_CHANNEL_ID, message_id=backup_poll_msg_id, reply_markup=initial_markup)
+                    except: pass
                 post_link = f"https://t.me/{CHANNEL_USERNAME}/{sent_photo_msg.message_id}"
 
             yeni_baslik = f"✅ {admin_etiket} Tarafından ONAYLANDI\n\n{html_full_caption}"
