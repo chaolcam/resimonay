@@ -376,10 +376,49 @@ def admin_manuel_mesaj(message):
 
 # 3. /siralama Komutu
 @bot.message_handler(commands=['siralama'])
-def send_ranking(message):
+def send_ranking_menu(message):
     kullanici_kaydet(message.from_user.id)
+    try: bot.delete_message(message.chat.id, message.message_id)
+    except: pass
+    
+    markup = InlineKeyboardMarkup(row_width=2)
+    btn_daily = InlineKeyboardButton("📅 Günlük Sıralama", callback_data="rank_daily")
+    btn_weekly = InlineKeyboardButton("🗓️ Haftalık Sıralama", callback_data="rank_weekly")
+    btn_monthly = InlineKeyboardButton("🏆 Aylık Sıralama", callback_data="rank_monthly")
+    btn_all = InlineKeyboardButton("🌍 Tüm Zamanlar", callback_data="rank_all")
+    markup.add(btn_daily, btn_weekly, btn_monthly, btn_all)
+    
     try:
-        all_votes = votes_col.find({})
+        bot.send_message(message.chat.id, "Hangi zaman dilimine ait sıralamayı görmek istiyorsunuz?", reply_markup=markup)
+    except:
+        pass
+
+# Sıralama Butonları İşleyici
+@bot.callback_query_handler(func=lambda call: call.data.startswith("rank_"))
+def handle_ranking_callback(call):
+    mode = call.data.split("_")[1]
+    
+    simdi = datetime.datetime.utcnow()
+    query = {}
+    title = ""
+    
+    if mode == "daily":
+        baslangic = simdi - datetime.timedelta(days=1)
+        query = {"created_at": {"$gte": baslangic}}
+        title = "📅 <b>Günlük En Yüksek Puanlılar (Son 24 Saat)</b>"
+    elif mode == "weekly":
+        baslangic = simdi - datetime.timedelta(days=7)
+        query = {"created_at": {"$gte": baslangic}}
+        title = "🗓️ <b>Haftalık En Yüksek Puanlılar (Son 7 Gün)</b>"
+    elif mode == "monthly":
+        baslangic = simdi - datetime.timedelta(days=30)
+        query = {"created_at": {"$gte": baslangic}}
+        title = "🏆 <b>Aylık En Yüksek Puanlılar (Son 30 Gün)</b>"
+    else:
+        title = "🌍 <b>Tüm Zamanların En İyileri (Top 10)</b>"
+        
+    try:
+        all_votes = votes_col.find(query)
         ranking_data = []
         for doc in all_votes:
             msg_id = doc.get("msg_id")
@@ -389,26 +428,33 @@ def send_ranking(message):
             avg_score = sum(voters.values()) / total_votes
             if total_votes >= 1:
                 bayesian_score = (total_votes * avg_score + 20 * 6.0) / (total_votes + 20)
-                ranking_data.append({"msg_id": msg_id, "photo_msg_id": doc.get("photo_msg_id", msg_id), "avg_score": avg_score, "total_votes": total_votes, "bayesian_score": bayesian_score})
+                ranking_data.append({"photo_msg_id": doc.get("photo_msg_id", msg_id), "avg_score": avg_score, "total_votes": total_votes, "bayesian_score": bayesian_score})
         
         if not ranking_data:
-            bot.reply_to(message, "Henüz hiç oy alan gönderi bulunmuyor.")
-            return
-
-        ranking_data.sort(key=lambda x: (x["bayesian_score"], x["total_votes"]), reverse=True)
-        top_10 = ranking_data[:10]
-        
-        text = "🏆 <b>En Yüksek Puanlı Gönderiler (Top 10)</b> 🏆\n\n"
-        for i, data in enumerate(top_10, 1):
-            photo_msg_id = data["photo_msg_id"]
-            avg = data["bayesian_score"]
-            votes_count = data["total_votes"]
-            link = f"https://t.me/{CHANNEL_USERNAME}/{photo_msg_id}"
-            text += f"<b>{i}.</b> <a href='{link}'>Gönderiye Git</a> - ⭐ {avg:.2f} <i>({votes_count} oy)</i>\n"
+            text = f"{title}\n\nBu zaman diliminde henüz oy alan gönderi bulunmuyor."
+        else:
+            ranking_data.sort(key=lambda x: (x["bayesian_score"], x["total_votes"]), reverse=True)
+            top_10 = ranking_data[:10]
             
-        bot.reply_to(message, text, parse_mode="HTML", disable_web_page_preview=True)
-    except:
-        bot.reply_to(message, "Sıralama oluşturulurken bir hata oluştu.")
+            text = f"{title}\n\n"
+            for i, data in enumerate(top_10, 1):
+                photo_msg_id = data["photo_msg_id"]
+                avg = data["bayesian_score"]
+                votes_count = data["total_votes"]
+                link = f"https://t.me/{CHANNEL_USERNAME}/{photo_msg_id}"
+                text += f"<b>{i}.</b> <a href='{link}'>Gönderiye Git</a> - ⭐ {avg:.2f} <i>({votes_count} oy)</i>\n"
+                
+        # Aynı menüyü tekrar ekle
+        markup = InlineKeyboardMarkup(row_width=2)
+        btn_daily = InlineKeyboardButton("📅 Günlük", callback_data="rank_daily")
+        btn_weekly = InlineKeyboardButton("🗓️ Haftalık", callback_data="rank_weekly")
+        btn_monthly = InlineKeyboardButton("🏆 Aylık", callback_data="rank_monthly")
+        btn_all = InlineKeyboardButton("🌍 Tüm Zamanlar", callback_data="rank_all")
+        markup.add(btn_daily, btn_weekly, btn_monthly, btn_all)
+        
+        bot.edit_message_text(text=text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
+    except Exception as e:
+        bot.answer_callback_query(call.id, "Sıralama oluşturulurken bir hata oluştu.")
 
 # /sil Komutu
 @bot.message_handler(commands=['sil'])
