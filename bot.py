@@ -801,13 +801,13 @@ def handle_callback(call):
     kanalda_gorunecek = "👤 İsimsiz"
     original_caption = ""
     
-    if "\n---\n" in html_full_caption:
-        parts = html_full_caption.split("\n---\n", 1)
+    if "\n---" in html_full_caption:
+        parts = html_full_caption.split("\n---", 1)
         meta = parts[0]
         original_caption = parts[1].strip()
         for line in meta.split('\n'):
             if "Kanalda Görünecek:" in line:
-                kanalda_gorunecek = line.replace("<b>Kanalda Görünecek:</b>", "").strip()
+                kanalda_gorunecek = line.split("Kanalda Görünecek:")[1].replace("</b>", "").strip()
     else:
         original_caption = html_full_caption.split("\n\n", 1)[1].strip() if "\n\n" in html_full_caption else ""
 
