@@ -268,6 +268,7 @@ def otomatik_mesaj_dongusu():
     ayin_birincisi_uyari = False
     ayin_birincisi_bitti = False
     gunluk_siralama_atildi = False
+    gunluk_duyuru_atildi = False
     print("⏰ Zamanlayıcı Motoru Çalıştırıldı...")
     while True:
         try:
@@ -296,17 +297,31 @@ def otomatik_mesaj_dongusu():
                 ayin_birincisi_uyari = False
                 ayin_birincisi_bitti = False
             
-            # Her gün 18:00
+            # 3 günde bir 18:00
             if tr_saati.hour == 18 and tr_saati.minute == 0:
-                if not mesaj_atildi:
-                    uyari_metni = (
-                        "⚠️ <b>Yasal Uyarı:</b> Burada paylaşılan medyalardaki kişilerin rızası ile atıldığı kabul edilir. "
-                        "Doğabilecek olası yasal sorunlardan veya sorumluluklardan bot yönetimi sorumlu değildir."
-                    )
-                    toplu_mesaj_gonder(uyari_metni)
-                    mesaj_atildi = True
+                if tr_saati.toordinal() % 3 == 0:
+                    if not mesaj_atildi:
+                        uyari_metni = (
+                            "⚠️ <b>Yasal Uyarı:</b> Burada paylaşılan medyalardaki kişilerin rızası ile atıldığı kabul edilir. "
+                            "Doğabilecek olası yasal sorunlardan veya sorumluluklardan bot yönetimi sorumlu değildir."
+                        )
+                        toplu_mesaj_gonder(uyari_metni)
+                        mesaj_atildi = True
             else:
                 mesaj_atildi = False 
+
+            # 3 günde bir 00:00 (Gece yarısı) kanal duyurusu
+            if tr_saati.hour == 0 and tr_saati.minute == 0:
+                if tr_saati.toordinal() % 3 == 0:
+                    if not gunluk_duyuru_atildi:
+                        duyuru = "📸 <b>Siz de kanalda resim puanlatmak ve yorumlatmak isterseniz, resimlerinizi @resimonaybot'a gönderebilirsiniz!</b>"
+                        try:
+                            bot.send_message(TARGET_CHANNEL_ID, duyuru, parse_mode="HTML")
+                        except:
+                            pass
+                        gunluk_duyuru_atildi = True
+            else:
+                gunluk_duyuru_atildi = False
 
             # Her Pazar 23:59
             if tr_saati.weekday() == 6 and tr_saati.hour == 23 and tr_saati.minute == 59:
@@ -455,6 +470,43 @@ def handle_ranking_callback(call):
         bot.edit_message_text(text=text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
         bot.answer_callback_query(call.id, "Sıralama oluşturulurken bir hata oluştu.")
+
+# /random Komutu
+@bot.message_handler(commands=['random'])
+def send_random_post(message):
+    kullanici_kaydet(message.from_user.id)
+    try: bot.delete_message(message.chat.id, message.message_id)
+    except: pass
+    
+    pipeline = [{"$sample": {"size": 1}}]
+    random_docs = list(votes_col.aggregate(pipeline))
+    
+    if not random_docs:
+        try: bot.send_message(message.chat.id, "Henüz oylanacak bir gönderi bulunmuyor.")
+        except: pass
+        return
+        
+    doc = random_docs[0]
+    msg_id = doc.get("msg_id")
+    photo_msg_id = doc.get("photo_msg_id", msg_id)
+    
+    msg_votes = doc.get("voters", {})
+    total_votes = len(msg_votes)
+    if total_votes > 0:
+        avg_score = sum(msg_votes.values()) / total_votes
+        bayesian_score = (total_votes * avg_score + 20 * 6.0) / (total_votes + 20)
+        score_text = f"\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
+    else:
+        score_text = "\n\n📊 Oylama Sonucu:\n⭐ Henüz oy verilmedi."
+        
+    caption_text = f"🎲 <b>Rastgele Gönderi Getirildi!</b>\nAşağıdan oylayabilirsiniz.{score_text}"
+    markup = generate_rating_keyboard(msg_id)
+    
+    try:
+        bot.copy_message(chat_id=message.chat.id, from_chat_id=TARGET_CHANNEL_ID, message_id=photo_msg_id, caption=caption_text, parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        try: bot.send_message(message.chat.id, "Rastgele gönderi getirilirken bir hata oluştu. Lütfen tekrar deneyin.")
+        except: pass
 
 # /sil Komutu
 @bot.message_handler(commands=['sil'])
@@ -758,24 +810,49 @@ def handle_callback(call):
             avg_score = sum(msg_votes.values()) / total_votes
             bayesian_score = (total_votes * avg_score + 20 * 6.0) / (total_votes + 20)
             
+            new_markup = generate_rating_keyboard(msg_id)
+            score_suffix = f"\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
+            new_caption = ""
+            new_text = ""
+
+            # 1. Tıklanan mesajı güncelle (Kullanıcının ekranındaki /random veya kanal mesajı)
             try:
                 if call.message.content_type in ['photo', 'video']:
                     full_caption = call.message.caption if call.message.caption else ""
                     base_caption = full_caption.split("📊 Oylama Sonucu:")[0].strip() if "📊 Oylama Sonucu:" in full_caption else full_caption.strip()
-                    new_caption = f"{base_caption}\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)" if base_caption else f"📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
-                    new_markup = generate_rating_keyboard(msg_id)
-                    bot.edit_message_caption(chat_id=TARGET_CHANNEL_ID, message_id=msg_id, caption=new_caption, reply_markup=new_markup)
+                    new_caption = f"{base_caption}{score_suffix}" if base_caption else f"📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
+                    bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, caption=new_caption, reply_markup=new_markup)
                 else:
                     full_text = call.message.text if call.message.text else ""
                     base_text = full_text.split("📊 Oylama Sonucu:")[0].strip() if "📊 Oylama Sonucu:" in full_text else full_text.strip()
-                    new_text = f"{base_text}\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)" if base_text else f"📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
-                    new_markup = generate_rating_keyboard(msg_id)
-                    bot.edit_message_text(chat_id=TARGET_CHANNEL_ID, message_id=msg_id, text=new_text, reply_markup=new_markup)
-                    if doc and doc.get("backup_msg_id") and BACKUP_CHANNEL_ID:
-                        try: bot.edit_message_text(chat_id=BACKUP_CHANNEL_ID, message_id=doc["backup_msg_id"], text=new_text, reply_markup=new_markup)
-                        except: pass
+                    new_text = f"{base_text}{score_suffix}" if base_text else f"📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
+                    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=new_text, reply_markup=new_markup)
             except Exception as e:
-                print("Oylama metni guncellenemedi:", e)
+                pass
+
+            # 2. Kanalı (ve yedeği) güncelle (Eğer oy kanaldan verilmediyse)
+            if call.message.chat.id != TARGET_CHANNEL_ID:
+                try:
+                    if doc and msg_id != doc.get("photo_msg_id", msg_id):
+                        bot.edit_message_text(chat_id=TARGET_CHANNEL_ID, message_id=msg_id, text=f"👇 Lütfen bu gönderiyi oylayın 👇{score_suffix}", reply_markup=new_markup)
+                        if doc.get("backup_msg_id") and BACKUP_CHANNEL_ID:
+                            try: bot.edit_message_text(chat_id=BACKUP_CHANNEL_ID, message_id=doc["backup_msg_id"], text=f"👇 Lütfen bu gönderiyi oylayın 👇{score_suffix}", reply_markup=new_markup)
+                            except: pass
+                    else:
+                        bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=msg_id, reply_markup=new_markup)
+                        if doc and doc.get("backup_msg_id") and BACKUP_CHANNEL_ID:
+                            try: bot.edit_message_reply_markup(chat_id=BACKUP_CHANNEL_ID, message_id=doc["backup_msg_id"], reply_markup=new_markup)
+                            except: pass
+                except Exception as e:
+                    pass
+            elif call.message.chat.id == TARGET_CHANNEL_ID:
+                if doc and doc.get("backup_msg_id") and BACKUP_CHANNEL_ID:
+                    try:
+                        if call.message.content_type in ['photo', 'video']:
+                            bot.edit_message_caption(chat_id=BACKUP_CHANNEL_ID, message_id=doc["backup_msg_id"], caption=new_caption, reply_markup=new_markup)
+                        else:
+                            bot.edit_message_text(chat_id=BACKUP_CHANNEL_ID, message_id=doc["backup_msg_id"], text=new_text, reply_markup=new_markup)
+                    except: pass
                 
             new_markup = generate_rating_keyboard(msg_id)
             if doc and "group_reply_msg_id" in doc and "group_chat_id" in doc:
