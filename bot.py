@@ -922,16 +922,34 @@ def handle_callback(call):
                     except: pass
                 
                 log_msg = bot.send_message(chat_id=admin_msg.chat.id, text="📊 <b>Güncel Oylama Durumu</b>\n<i>Henüz oy verilmedi...</i>", reply_to_message_id=admin_msg.message_id, parse_mode="HTML")
-                votes_col.insert_one({
-                    "msg_id": sent_poll_msg.message_id, 
-                    "photo_msg_id": sent_photo_msg.message_id,
-                    "backup_msg_id": backup_poll_msg_id,
-                    "voters": {}, 
-                    "voter_names": {}, 
-                    "log_msg_id": log_msg.message_id, 
-                    "log_chat_id": admin_msg.chat.id, 
-                    "created_at": datetime.datetime.utcnow()
-                })
+                
+                try:
+                    votes_col.insert_one({
+                        "msg_id": sent_poll_msg.message_id, 
+                        "photo_msg_id": sent_photo_msg.message_id,
+                        "backup_msg_id": backup_poll_msg_id,
+                        "voters": {}, 
+                        "voter_names": {}, 
+                        "log_msg_id": log_msg.message_id, 
+                        "log_chat_id": admin_msg.chat.id, 
+                        "created_at": datetime.datetime.utcnow()
+                    })
+                except Exception as db_err:
+                    # Veritabanına kayıt başarısız olduysa (örn: kota dolduysa), atılan mesajları sil ve işlemi iptal et
+                    try: bot.delete_message(TARGET_CHANNEL_ID, sent_photo_msg.message_id)
+                    except: pass
+                    try: bot.delete_message(TARGET_CHANNEL_ID, sent_poll_msg.message_id)
+                    except: pass
+                    try: bot.delete_message(admin_msg.chat.id, log_msg.message_id)
+                    except: pass
+                    if BACKUP_CHANNEL_ID and sent_backup_photo_msg:
+                        try: bot.delete_message(BACKUP_CHANNEL_ID, sent_backup_photo_msg.message_id)
+                        except: pass
+                        if backup_poll_msg_id:
+                            try: bot.delete_message(BACKUP_CHANNEL_ID, backup_poll_msg_id)
+                            except: pass
+                    raise db_err
+
                 initial_markup = generate_rating_keyboard(sent_poll_msg.message_id)
                 bot.edit_message_reply_markup(chat_id=TARGET_CHANNEL_ID, message_id=sent_poll_msg.message_id, reply_markup=initial_markup)
                 if backup_poll_msg_id and BACKUP_CHANNEL_ID:
