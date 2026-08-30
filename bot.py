@@ -378,8 +378,9 @@ def admin_manuel_mesaj(message):
 @bot.message_handler(commands=['siralama'])
 def send_ranking_menu(message):
     kullanici_kaydet(message.from_user.id)
-    try: bot.delete_message(message.chat.id, message.message_id)
-    except: pass
+    if message.from_user.id != PATRON_ID:
+        try: bot.delete_message(message.chat.id, message.message_id)
+        except: pass
     
     markup = InlineKeyboardMarkup(row_width=2)
     btn_daily = InlineKeyboardButton("📅 Günlük Sıralama", callback_data="rank_daily")
@@ -459,9 +460,15 @@ def handle_ranking_callback(call):
 # /random Komutu
 @bot.message_handler(commands=['random'])
 def send_random_post(message):
+    if message.chat.type == 'private':
+        try: bot.reply_to(message, "⚠️ Bu komut özel sohbetlerde kullanılamaz. Sadece <a href='https://t.me/+179Un-nGZsAyNDI0'>tartışma grubumuzda</a> kullanabilirsiniz.", parse_mode="HTML", disable_web_page_preview=True)
+        except: pass
+        return
+
     kullanici_kaydet(message.from_user.id)
-    try: bot.delete_message(message.chat.id, message.message_id)
-    except: pass
+    if message.from_user.id != PATRON_ID:
+        try: bot.delete_message(message.chat.id, message.message_id)
+        except: pass
     
     pipeline = [{"$sample": {"size": 1}}]
     random_docs = list(votes_col.aggregate(pipeline))
