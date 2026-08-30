@@ -268,7 +268,6 @@ def otomatik_mesaj_dongusu():
     ayin_birincisi_uyari = False
     ayin_birincisi_bitti = False
     gunluk_siralama_atildi = False
-    gunluk_duyuru_atildi = False
     print("⏰ Zamanlayıcı Motoru Çalıştırıldı...")
     while True:
         try:
@@ -297,31 +296,17 @@ def otomatik_mesaj_dongusu():
                 ayin_birincisi_uyari = False
                 ayin_birincisi_bitti = False
             
-            # 3 günde bir 18:00
+            # Her gün 18:00
             if tr_saati.hour == 18 and tr_saati.minute == 0:
-                if tr_saati.toordinal() % 3 == 0:
-                    if not mesaj_atildi:
-                        uyari_metni = (
-                            "⚠️ <b>Yasal Uyarı:</b> Burada paylaşılan medyalardaki kişilerin rızası ile atıldığı kabul edilir. "
-                            "Doğabilecek olası yasal sorunlardan veya sorumluluklardan bot yönetimi sorumlu değildir."
-                        )
-                        toplu_mesaj_gonder(uyari_metni)
-                        mesaj_atildi = True
+                if not mesaj_atildi:
+                    uyari_metni = (
+                        "⚠️ <b>Yasal Uyarı:</b> Burada paylaşılan medyalardaki kişilerin rızası ile atıldığı kabul edilir. "
+                        "Doğabilecek olası yasal sorunlardan veya sorumluluklardan bot yönetimi sorumlu değildir."
+                    )
+                    toplu_mesaj_gonder(uyari_metni)
+                    mesaj_atildi = True
             else:
                 mesaj_atildi = False 
-
-            # 3 günde bir 00:00 (Gece yarısı) kanal duyurusu
-            if tr_saati.hour == 0 and tr_saati.minute == 0:
-                if tr_saati.toordinal() % 3 == 0:
-                    if not gunluk_duyuru_atildi:
-                        duyuru = "📸 <b>Siz de kanalda resim puanlatmak ve yorumlatmak isterseniz, resimlerinizi @resimonaybot'a gönderebilirsiniz!</b>"
-                        try:
-                            bot.send_message(TARGET_CHANNEL_ID, duyuru, parse_mode="HTML")
-                        except:
-                            pass
-                        gunluk_duyuru_atildi = True
-            else:
-                gunluk_duyuru_atildi = False
 
             # Her Pazar 23:59
             if tr_saati.weekday() == 6 and tr_saati.hour == 23 and tr_saati.minute == 59:
@@ -654,7 +639,7 @@ def handle_group_forwards(message):
         group_chat_id = message.chat.id
         markup = generate_rating_keyboard(channel_msg_id)
         try:
-            reply_text = "👇 Oylamaya bu tartışma grubundan da katılabilirsiniz 👇"
+            reply_text = "👇 Oylamaya buradan katılabilirsiniz 👇"
             reply_msg = bot.send_message(chat_id=group_chat_id, text=reply_text, reply_to_message_id=group_msg_id, reply_markup=markup)
             votes_col.update_one({"msg_id": channel_msg_id}, {"$set": {"group_reply_msg_id": reply_msg.message_id, "group_chat_id": group_chat_id}}, upsert=True)
         except:
@@ -857,7 +842,7 @@ def handle_callback(call):
             new_markup = generate_rating_keyboard(msg_id)
             if doc and "group_reply_msg_id" in doc and "group_chat_id" in doc:
                 try:
-                    group_text = f"👇 Oylamaya bu tartışma grubundan da katılabilirsiniz 👇\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
+                    group_text = f"👇 Oylamaya buradan katılabilirsiniz 👇\n\n📊 Oylama Sonucu:\n⭐ Güven Puanı: {bayesian_score:.2f} / 10 ({total_votes} oy)"
                     bot.edit_message_text(chat_id=doc["group_chat_id"], message_id=doc["group_reply_msg_id"], text=group_text, reply_markup=new_markup)
                 except: pass
 
