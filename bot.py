@@ -20,6 +20,10 @@ PATRON_ID = 7075582251
 
 bot = telebot.TeleBot(TOKEN)
 
+# Ağ kilitlenmelerini önlemek için Telegram'dan 30sn içinde yanıt gelmezse bağlantıyı zorla kopart
+from telebot import apihelper
+apihelper.CUSTOM_REQUEST_KWARGS = {'timeout': 30}
+
 # --- MONGODB BAĞLANTISI ---
 db_client = pymongo.MongoClient(MONGO_URI)
 db = db_client["oylama_botu_veritabani"]
@@ -1039,5 +1043,5 @@ if __name__ == "__main__":
     Thread(target=otomatik_mesaj_dongusu, daemon=True).start()
     
     print("Bot Tam Kapasiteyle Başlatıldı!")
-    bot.infinity_polling()
+    bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
 
